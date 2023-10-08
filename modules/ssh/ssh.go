@@ -124,24 +124,30 @@ func sessionHandler(session ssh.Session) {
 
 	go func() {
 		defer stdin.Close()
-		if _, err := io.Copy(stdin, session); err != nil {
+		if n, err := io.Copy(stdin, session); err != nil {
 			log.Error("Failed to write session to stdin. %s", err)
+		} else {
+			log.Warn("copy to stdin %d bytes", n)
 		}
 	}()
 
 	go func() {
 		defer wg.Done()
 		defer stdout.Close()
-		if _, err := io.Copy(session, stdout); err != nil {
+		if n, err := io.Copy(session, stdout); err != nil {
 			log.Error("Failed to write stdout to session. %s", err)
+		} else {
+			log.Warn("copy from stdout %d bytes", n)
 		}
 	}()
 
 	go func() {
 		defer wg.Done()
 		defer stderr.Close()
-		if _, err := io.Copy(session.Stderr(), stderr); err != nil {
+		if n, err := io.Copy(session.Stderr(), stderr); err != nil {
 			log.Error("Failed to write stderr to session. %s", err)
+		} else {
+			log.Warn("copy from stderr %d bytes", n)
 		}
 	}()
 
