@@ -12,6 +12,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+// var reqSizeCounter = prometheus.
+
 // Metrics validate auth token and render prometheus metrics
 func Metrics(resp http.ResponseWriter, req *http.Request) {
 	if setting.Metrics.Token == "" {

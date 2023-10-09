@@ -127,7 +127,7 @@ func sessionHandler(session ssh.Session) {
 		if n, err := io.Copy(stdin, session); err != nil {
 			log.Error("Failed to write session to stdin. %s", err)
 		} else {
-			log.Warn("copy to stdin %d bytes", n)
+			log.Warn("[%s] copy to stdin %d bytes", session.RemoteAddr().String(), n)
 		}
 	}()
 
@@ -137,7 +137,7 @@ func sessionHandler(session ssh.Session) {
 		if n, err := io.Copy(session, stdout); err != nil {
 			log.Error("Failed to write stdout to session. %s", err)
 		} else {
-			log.Warn("copy from stdout %d bytes", n)
+			log.Warn("[%s] copy from stdout %d bytes", session.RemoteAddr().String(), n)
 		}
 	}()
 
@@ -147,7 +147,7 @@ func sessionHandler(session ssh.Session) {
 		if n, err := io.Copy(session.Stderr(), stderr); err != nil {
 			log.Error("Failed to write stderr to session. %s", err)
 		} else {
-			log.Warn("copy from stderr %d bytes", n)
+			log.Warn("[%s] copy from stderr %d bytes", session.RemoteAddr().String(), n)
 		}
 	}()
 
