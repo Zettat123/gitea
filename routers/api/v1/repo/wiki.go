@@ -16,6 +16,7 @@ import (
 	api "code.gitea.io/gitea/modules/structs"
 	"code.gitea.io/gitea/modules/util"
 	"code.gitea.io/gitea/modules/web"
+	wiki_module "code.gitea.io/gitea/modules/wiki"
 	"code.gitea.io/gitea/services/context"
 	"code.gitea.io/gitea/services/convert"
 	notify_service "code.gitea.io/gitea/services/notify"
@@ -63,7 +64,7 @@ func NewWikiPage(ctx *context.APIContext) {
 		return
 	}
 
-	wikiName := wiki_service.UserTitleToWebPath("", form.Title)
+	wikiName := wiki_module.UserTitleToWebPath("", form.Title)
 
 	if len(form.Message) == 0 {
 		form.Message = fmt.Sprintf("Add %q", form.Title)
@@ -77,7 +78,7 @@ func NewWikiPage(ctx *context.APIContext) {
 	form.ContentBase64 = string(content)
 
 	if err := wiki_service.AddWikiPage(ctx, ctx.Doer, ctx.Repo.Repository, wikiName, form.ContentBase64, form.Message); err != nil {
-		if repo_model.IsErrWikiReservedName(err) {
+		if wiki_module.IsErrWikiReservedName(err) {
 			ctx.Error(http.StatusBadRequest, "IsErrWikiReservedName", err)
 		} else if repo_model.IsErrWikiAlreadyExist(err) {
 			ctx.Error(http.StatusBadRequest, "IsErrWikiAlreadyExists", err)
@@ -136,8 +137,8 @@ func EditWikiPage(ctx *context.APIContext) {
 
 	form := web.GetForm(ctx).(*api.CreateWikiPageOptions)
 
-	oldWikiName := wiki_service.WebPathFromRequest(ctx.PathParamRaw(":pageName"))
-	newWikiName := wiki_service.UserTitleToWebPath("", form.Title)
+	oldWikiName := wiki_module.WebPathFromRequest(ctx.PathParamRaw(":pageName"))
+	newWikiName := wiki_module.UserTitleToWebPath("", form.Title)
 
 	if len(newWikiName) == 0 {
 		newWikiName = oldWikiName
@@ -167,7 +168,7 @@ func EditWikiPage(ctx *context.APIContext) {
 	}
 }
 
-func getWikiPage(ctx *context.APIContext, wikiName wiki_service.WebPath) *api.WikiPage {
+func getWikiPage(ctx *context.APIContext, wikiName wiki_module.WebPath) *api.WikiPage {
 	wikiRepo, commit := findWikiRepoCommit(ctx)
 	if wikiRepo != nil {
 		defer wikiRepo.Close()
@@ -242,7 +243,7 @@ func DeleteWikiPage(ctx *context.APIContext) {
 	//   "423":
 	//     "$ref": "#/responses/repoArchivedError"
 
-	wikiName := wiki_service.WebPathFromRequest(ctx.PathParamRaw(":pageName"))
+	wikiName := wiki_module.WebPathFromRequest(ctx.PathParamRaw(":pageName"))
 
 	if err := wiki_service.DeleteWikiPage(ctx, ctx.Doer, ctx.Repo.Repository, wikiName); err != nil {
 		if err.Error() == "file does not exist" {
@@ -325,9 +326,9 @@ func ListWikiPages(ctx *context.APIContext) {
 			ctx.Error(http.StatusInternalServerError, "GetCommit", err)
 			return
 		}
-		wikiName, err := wiki_service.GitPathToWebPath(entry.Name())
+		wikiName, err := wiki_module.GitPathToWebPath(entry.Name())
 		if err != nil {
-			if repo_model.IsErrWikiInvalidFileName(err) {
+			if wiki_module.IsErrWikiInvalidFileName(err) {
 				continue
 			}
 			ctx.Error(http.StatusInternalServerError, "WikiFilenameToName", err)
@@ -370,7 +371,7 @@ func GetWikiPage(ctx *context.APIContext) {
 	//     "$ref": "#/responses/notFound"
 
 	// get requested pagename
-	pageName := wiki_service.WebPathFromRequest(ctx.PathParamRaw(":pageName"))
+	pageName := wiki_module.WebPathFromRequest(ctx.PathParamRaw(":pageName"))
 
 	wikiPage := getWikiPage(ctx, pageName)
 	if !ctx.Written() {
@@ -420,7 +421,7 @@ func ListPageRevisions(ctx *context.APIContext) {
 	}
 
 	// get requested pagename
-	pageName := wiki_service.WebPathFromRequest(ctx.PathParamRaw(":pageName"))
+	pageName := wiki_module.WebPathFromRequest(ctx.PathParamRaw(":pageName"))
 	if len(pageName) == 0 {
 		pageName = "Home"
 	}
@@ -515,8 +516,8 @@ func wikiContentsByEntry(ctx *context.APIContext, entry *git.TreeEntry) string {
 
 // wikiContentsByName returns the contents of a wiki page, along with a boolean
 // indicating whether the page exists. Writes to ctx if an error occurs.
-func wikiContentsByName(ctx *context.APIContext, commit *git.Commit, wikiName wiki_service.WebPath, isSidebarOrFooter bool) (string, string) {
-	gitFilename := wiki_service.WebPathToGitPath(wikiName)
+func wikiContentsByName(ctx *context.APIContext, commit *git.Commit, wikiName wiki_module.WebPath, isSidebarOrFooter bool) (string, string) {
+	gitFilename := wiki_module.WebPathToGitPath(wikiName)
 	entry, err := findEntryForFile(commit, gitFilename)
 	if err != nil {
 		if git.IsErrNotExist(err) {

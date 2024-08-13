@@ -69,20 +69,21 @@ type Header struct {
 
 // RenderContext represents a render context
 type RenderContext struct {
-	Ctx              context.Context
-	RelativePath     string // relative path from tree root of the branch
-	Type             string
-	IsWiki           bool
-	Links            Links
-	Metas            map[string]string // user, repo, mode(comment/document)
-	DefaultLink      string
-	GitRepo          *git.Repository
-	Repo             gitrepo.Repository
-	ShaExistCache    map[string]bool
-	cancelFn         func()
-	SidebarTocNode   ast.Node
-	RenderMetaAs     RenderMetaMode
-	InStandalonePage bool // used by external render. the router "/org/repo/render/..." will output the rendered content in a standalone page
+	Ctx               context.Context
+	RelativePath      string // relative path from tree root of the branch
+	Type              string
+	IsWiki            bool
+	WikiDefaultBranch string
+	Links             Links
+	Metas             map[string]string // user, repo, mode(comment/document)
+	DefaultLink       string
+	GitRepo           *git.Repository
+	Repo              gitrepo.Repository
+	ShaExistCache     map[string]bool
+	cancelFn          func()
+	SidebarTocNode    ast.Node
+	RenderMetaAs      RenderMetaMode
+	InStandalonePage  bool // used by external render. the router "/org/repo/render/..." will output the rendered content in a standalone page
 }
 
 type Links struct {

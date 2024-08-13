@@ -5,8 +5,11 @@ package markup
 
 import (
 	"path"
+	"strings"
 
+	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/util"
+	wiki_module "code.gitea.io/gitea/modules/wiki"
 )
 
 func ResolveLink(ctx *RenderContext, link, userContentAnchorPrefix string) (result string, resolved bool) {
@@ -18,6 +21,8 @@ func ResolveLink(ctx *RenderContext, link, userContentAnchorPrefix string) (resu
 				linkBase = ctx.Links.WikiLink() // the link is for a wiki page
 			} else if DetectMarkupTypeByFileName(link) != "" {
 				linkBase = ctx.Links.WikiLink() // the link is renderable as a wiki page
+			} else if hasMarkdownFile(ctx, link) {
+				linkBase = ctx.Links.WikiLink()
 			} else {
 				linkBase = ctx.Links.WikiRawLink() // otherwise, use a raw link instead to view&download medias
 			}
@@ -32,4 +37,21 @@ func ResolveLink(ctx *RenderContext, link, userContentAnchorPrefix string) (resu
 		link, resolved = userContentAnchorPrefix+link[1:], true
 	}
 	return link, resolved
+}
+
+func hasMarkdownFile(ctx *RenderContext, link string) bool {
+	if !ctx.IsWiki || ctx.Repo == nil || ctx.GitRepo == nil {
+		return false
+	}
+	gitPath := wiki_module.WebPathToGitPath(wiki_module.WebPathFromRequest(link))
+	_, err := ctx.GitRepo.LsFiles(gitPath)
+	if err != nil {
+		if strings.Contains(err.Error(), "Not a valid object name") {
+			return false
+		}
+		log.Error("Wiki LsTree LsFiles, err: %v", err)
+		return false
+	}
+
+	return true
 }

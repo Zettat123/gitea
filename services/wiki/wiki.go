@@ -22,6 +22,7 @@ import (
 	repo_module "code.gitea.io/gitea/modules/repository"
 	"code.gitea.io/gitea/modules/sync"
 	"code.gitea.io/gitea/modules/util"
+	wiki_module "code.gitea.io/gitea/modules/wiki"
 	asymkey_service "code.gitea.io/gitea/services/asymkey"
 	repo_service "code.gitea.io/gitea/services/repository"
 )
@@ -50,9 +51,9 @@ func InitWiki(ctx context.Context, repo *repo_model.Repository) error {
 
 // prepareGitPath try to find a suitable file path with file name by the given raw wiki name.
 // return: existence, prepared file path with name, error
-func prepareGitPath(gitRepo *git.Repository, defaultWikiBranch string, wikiPath WebPath) (bool, string, error) {
+func prepareGitPath(gitRepo *git.Repository, defaultWikiBranch string, wikiPath wiki_module.WebPath) (bool, string, error) {
 	unescaped := string(wikiPath) + ".md"
-	gitPath := WebPathToGitPath(wikiPath)
+	gitPath := wiki_module.WebPathToGitPath(wikiPath)
 
 	// Look for both files
 	filesInIndex, err := gitRepo.LsTree(defaultWikiBranch, unescaped, gitPath)
@@ -80,13 +81,13 @@ func prepareGitPath(gitRepo *git.Repository, defaultWikiBranch string, wikiPath 
 }
 
 // updateWikiPage adds a new page or edits an existing page in repository wiki.
-func updateWikiPage(ctx context.Context, doer *user_model.User, repo *repo_model.Repository, oldWikiName, newWikiName WebPath, content, message string, isNew bool) (err error) {
+func updateWikiPage(ctx context.Context, doer *user_model.User, repo *repo_model.Repository, oldWikiName, newWikiName wiki_module.WebPath, content, message string, isNew bool) (err error) {
 	err = repo.MustNotBeArchived()
 	if err != nil {
 		return err
 	}
 
-	if err = validateWebPath(newWikiName); err != nil {
+	if err = wiki_module.ValidateWebPath(newWikiName); err != nil {
 		return err
 	}
 	wikiWorkingPool.CheckIn(fmt.Sprint(repo.ID))
@@ -233,18 +234,18 @@ func updateWikiPage(ctx context.Context, doer *user_model.User, repo *repo_model
 }
 
 // AddWikiPage adds a new wiki page with a given wikiPath.
-func AddWikiPage(ctx context.Context, doer *user_model.User, repo *repo_model.Repository, wikiName WebPath, content, message string) error {
+func AddWikiPage(ctx context.Context, doer *user_model.User, repo *repo_model.Repository, wikiName wiki_module.WebPath, content, message string) error {
 	return updateWikiPage(ctx, doer, repo, "", wikiName, content, message, true)
 }
 
 // EditWikiPage updates a wiki page identified by its wikiPath,
 // optionally also changing wikiPath.
-func EditWikiPage(ctx context.Context, doer *user_model.User, repo *repo_model.Repository, oldWikiName, newWikiName WebPath, content, message string) error {
+func EditWikiPage(ctx context.Context, doer *user_model.User, repo *repo_model.Repository, oldWikiName, newWikiName wiki_module.WebPath, content, message string) error {
 	return updateWikiPage(ctx, doer, repo, oldWikiName, newWikiName, content, message, false)
 }
 
 // DeleteWikiPage deletes a wiki page identified by its path.
-func DeleteWikiPage(ctx context.Context, doer *user_model.User, repo *repo_model.Repository, wikiName WebPath) (err error) {
+func DeleteWikiPage(ctx context.Context, doer *user_model.User, repo *repo_model.Repository, wikiName wiki_module.WebPath) (err error) {
 	err = repo.MustNotBeArchived()
 	if err != nil {
 		return err
