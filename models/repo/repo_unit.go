@@ -169,7 +169,8 @@ func (cfg *PullRequestsConfig) GetDefaultMergeStyle() MergeStyle {
 }
 
 type ActionsConfig struct {
-	DisabledWorkflows []string
+	DisabledWorkflows       []string
+	AccessbleFromOtherRepos bool
 }
 
 func (cfg *ActionsConfig) EnableWorkflow(file string) {

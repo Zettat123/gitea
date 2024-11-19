@@ -195,8 +195,16 @@ func httpBase(ctx *context.Context) *serviceHandler {
 					return nil
 				}
 				if task.RepoID != repo.ID {
-					ctx.PlainText(http.StatusForbidden, "User permission denied")
-					return nil
+					taskRepo, err := repo_model.GetRepositoryByID(ctx, task.RepoID)
+					if err != nil {
+						ctx.ServerError("GetRepositoryByID", err)
+						return nil
+					}
+					actionsCfg := repo.MustGetUnit(ctx, unit.TypeActions).ActionsConfig()
+					if !taskRepo.IsPrivate || taskRepo.OwnerID != repo.OwnerID || !actionsCfg.AccessbleFromOtherRepos {
+						ctx.PlainText(http.StatusForbidden, "User permission denied")
+						return nil
+					}
 				}
 
 				if task.IsForkPullRequest {
