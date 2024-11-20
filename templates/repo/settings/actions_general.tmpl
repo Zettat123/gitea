@@ -3,13 +3,18 @@
     {{ctx.Locale.Tr "actions.general.settings"}}
   </h4>
   <div class="ui attached segment">
-    <form class="ui form" method="post">
+    <form class="ui form" action="{{.Link}}" method="post">
+      {{.CsrfTokenHtml}}
       <div id="actions_accessible_from_other_repositories_box" class="field">
         <div class="ui checkbox">
-          <input id="actions_accessible_from_other_repositories" name="actions_accessible_from_other_repositories" type="checkbox">
+          <input id="actions_accessible_from_other_repositories" name="actions_accessible_from_other_repositories" type="checkbox" {{if .AccessibleFromOtherRepos}}checked{{end}}>
           <label>{{ctx.Locale.Tr "actions.general.actions_accessible_from_other_repositories" .Owner.Name}}</label>
           <p class="help">{{ctx.Locale.Tr "actions.general.actions_accessible_from_other_repositories_desc" .Owner.Name}}</p>
         </div>
+      </div>
+      <div class="divider"></div>
+      <div class="field">
+        <button class="ui primary button">{{ctx.Locale.Tr "save"}}</button>
       </div>
     </form>
   </div>

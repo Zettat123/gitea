@@ -1133,7 +1133,9 @@ func registerRoutes(m *web.Router) {
 			addSettingsRunnersRoutes()
 			addSettingsSecretsRoutes()
 			addSettingsVariablesRoutes()
-			m.Get("/general", repo_setting.ActionsGeneral)
+			m.Combo("/general").
+				Get(repo_setting.ActionsGeneralSettings).
+				Post(repo_setting.ActionsGeneralSettingsPost)
 		}, actions.MustEnableActions)
 		// the follow handler must be under "settings", otherwise this incomplete repo can't be accessed
 		m.Group("/migrate", func() {
