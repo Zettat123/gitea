@@ -12,9 +12,7 @@ import (
 	"code.gitea.io/gitea/services/context"
 )
 
-const (
-	tplRepoActionsGeneralSettings base.TplName = "repo/settings/actions"
-)
+const tplRepoActionsGeneralSettings base.TplName = "repo/settings/actions"
 
 func ActionsGeneralSettings(ctx *context.Context) {
 	ctx.Data["Title"] = ctx.Tr("actions.general")

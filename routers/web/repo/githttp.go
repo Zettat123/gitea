@@ -195,13 +195,17 @@ func httpBase(ctx *context.Context) *serviceHandler {
 					return nil
 				}
 				if task.RepoID != repo.ID {
+					actionsCfg := repo.MustGetUnit(ctx, unit.TypeActions).ActionsConfig()
 					taskRepo, err := repo_model.GetRepositoryByID(ctx, task.RepoID)
 					if err != nil {
 						ctx.ServerError("GetRepositoryByID", err)
 						return nil
 					}
-					actionsCfg := repo.MustGetUnit(ctx, unit.TypeActions).ActionsConfig()
-					if !taskRepo.IsPrivate || taskRepo.OwnerID != repo.OwnerID || !actionsCfg.AccessbleFromOtherRepos {
+					if !actionsCfg.AccessbleFromOtherRepos || taskRepo.OwnerID != repo.OwnerID || !taskRepo.IsPrivate {
+						// See https://docs.github.com/en/actions/sharing-automations/sharing-actions-and-workflows-from-your-private-repository
+						// Any actions or reusable workflows stored in the private repository can be used in
+						// workflows defined in other private repositories owned by the same organization or user.
+						// Actions and reusable workflows stored in private repositories cannot be used in public repositories.
 						ctx.PlainText(http.StatusForbidden, "User permission denied")
 						return nil
 					}
