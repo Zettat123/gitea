@@ -19,7 +19,7 @@ func ActionsGeneralSettings(ctx *context.Context) {
 	ctx.Data["PageType"] = "general"
 	ctx.Data["PageIsActionsSettingsGeneral"] = true
 
-	accessbleFromOtherRepos := false
+	var accessbleFromOtherRepos bool
 	if !ctx.Repo.Repository.IsPrivate {
 		accessbleFromOtherRepos = true
 	} else {
