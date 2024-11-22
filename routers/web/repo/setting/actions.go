@@ -19,14 +19,18 @@ func ActionsGeneralSettings(ctx *context.Context) {
 	ctx.Data["PageType"] = "general"
 	ctx.Data["PageIsActionsSettingsGeneral"] = true
 
-	actionsUnit, err := ctx.Repo.Repository.GetUnit(ctx, unit_model.TypeActions)
-	if err != nil {
-		ctx.ServerError("GetUnit", err)
-		return
+	accessbleFromOtherRepos := false
+	if !ctx.Repo.Repository.IsPrivate {
+		accessbleFromOtherRepos = true
+	} else {
+		actionsUnit, err := ctx.Repo.Repository.GetUnit(ctx, unit_model.TypeActions)
+		if err != nil {
+			ctx.ServerError("GetUnit", err)
+			return
+		}
+		accessbleFromOtherRepos = actionsUnit.ActionsConfig().AccessbleFromOtherRepos
 	}
-	actionsCfg := actionsUnit.ActionsConfig()
-
-	ctx.Data["AccessibleFromOtherRepos"] = actionsCfg.AccessbleFromOtherRepos
+	ctx.Data["AccessibleFromOtherRepos"] = accessbleFromOtherRepos
 
 	ctx.HTML(http.StatusOK, tplRepoActionsGeneralSettings)
 }

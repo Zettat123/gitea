@@ -7,9 +7,15 @@
 			{{.CsrfTokenHtml}}
 			<div id="actions_accessible_from_other_repositories_box" class="field">
 				<div class="ui checkbox">
-					<input id="actions_accessible_from_other_repositories" name="actions_accessible_from_other_repositories" type="checkbox" {{if .AccessibleFromOtherRepos}}checked{{end}}>
+					<input id="actions_accessible_from_other_repositories" name="actions_accessible_from_other_repositories" type="checkbox" {{if not .Repository.IsPrivate}}disabled{{end}} {{if .AccessibleFromOtherRepos}}checked{{end}}>
 					<label>{{ctx.Locale.Tr "actions.general.actions_accessible_from_other_repositories" .Owner.Name}}</label>
-					<p class="help">{{ctx.Locale.Tr "actions.general.actions_accessible_from_other_repositories_desc" .Owner.Name}}</p>
+					<p class="help">
+					{{if .Repository.IsPrivate}}
+						{{ctx.Locale.Tr "actions.general.actions_accessible_from_other_repositories_desc" .Owner.Name}}
+					{{else}}
+						{{ctx.Locale.Tr "actions.general.actions_always_accessible_desc"}}
+					{{end}}
+					</p>
 				</div>
 			</div>
 			<div class="divider"></div>
