@@ -1,27 +1,48 @@
 <div class="repo-setting-content">
 	<h4 class="ui top attached header">
-		{{ctx.Locale.Tr "actions.general.settings"}}
+		{{ctx.Locale.Tr "actions.general.collaborative_owners_management"}}
 	</h4>
+	{{if .CollaborativeOwners}}
 	<div class="ui attached segment">
-		<form class="ui form" action="{{.Link}}" method="post">
-			{{.CsrfTokenHtml}}
-			<div id="actions_accessible_from_other_repositories_box" class="field">
-				<div class="ui checkbox">
-					<input id="actions_accessible_from_other_repositories" name="actions_accessible_from_other_repositories" type="checkbox" {{if not .Repository.IsPrivate}}disabled{{end}} {{if .AccessibleFromOtherRepos}}checked{{end}}>
-					<label>{{ctx.Locale.Tr "actions.general.actions_accessible_from_other_repositories" .Owner.Name}}</label>
-					<p class="help">
-					{{if .Repository.IsPrivate}}
-						{{ctx.Locale.Tr "actions.general.actions_accessible_from_other_repositories_desc" .Owner.Name}}
-					{{else}}
-						{{ctx.Locale.Tr "actions.general.actions_always_accessible_desc"}}
-					{{end}}
-					</p>
+		<div class="flex-list">
+			{{range .CollaborativeOwners}}
+				<div class="flex-item tw-items-center">
+					<div class="flex-item-leading">
+						<a href="{{.HomeLink}}">{{ctx.AvatarUtils.Avatar . 32}}</a>
+					</div>
+					<div class="flex-item-main">
+						<div class="flex-item-title">
+							{{template "shared/user/name" .}}
+						</div>
+					</div>
+					<div class="flex-item-trailing">
+						<button class="ui red tiny button inline delete-button" data-url="{{$.Link}}/collaborative_owner/delete" data-id="{{.ID}}">
+							{{ctx.Locale.Tr "remove"}}
+						</button>
+					</div>
 				</div>
+			{{end}}
+		</div>
+	</div>
+	{{end}}
+	<div class="ui bottom attached segment">
+		<form class="ui form" action="{{.Link}}/collaborative_owner/add" method="post">
+			{{.CsrfTokenHtml}}
+			<div id="search-user-box" class="ui search input tw-align-middle" data-include-orgs="true">
+				<input class="prompt" name="collaborative_owner" placeholder="{{ctx.Locale.Tr "search.user_kind"}}" autocomplete="off" autofocus required>
 			</div>
-			<div class="divider"></div>
-			<div class="field">
-				<button class="ui primary button">{{ctx.Locale.Tr "save"}}</button>
-			</div>
+			<button class="ui primary button">{{ctx.Locale.Tr "actions.general.add_collaborative_owner"}}</button>
 		</form>
 	</div>
+</div>
+
+<div class="ui g-modal-confirm delete modal">
+	<div class="header">
+		{{svg "octicon-trash"}}
+		{{ctx.Locale.Tr "actions.general.remove_collaborative_owner"}}
+	</div>
+	<div class="content">
+		<p>{{ctx.Locale.Tr "actions.general.remove_collaborative_owner_desc"}}</p>
+	</div>
+	{{template "base/modal_actions_confirm" .}}
 </div>

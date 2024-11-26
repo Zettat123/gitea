@@ -1133,9 +1133,13 @@ func registerRoutes(m *web.Router) {
 			addSettingsRunnersRoutes()
 			addSettingsSecretsRoutes()
 			addSettingsVariablesRoutes()
-			m.Combo("/general").
-				Get(repo_setting.ActionsGeneralSettings).
-				Post(repo_setting.ActionsGeneralSettingsPost)
+			m.Group("/general", func() {
+				m.Get("", repo_setting.ActionsGeneralSettings)
+				m.Group("/collaborative_owner", func() {
+					m.Post("/add", repo_setting.AddCollaborativeOwner)
+					m.Post("/delete", repo_setting.DeleteCollaborativeOwner)
+				})
+			})
 		}, actions.MustEnableActions)
 		// the follow handler must be under "settings", otherwise this incomplete repo can't be accessed
 		m.Group("/migrate", func() {
