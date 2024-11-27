@@ -2,25 +2,30 @@
 	<h4 class="ui top attached header">
 		{{ctx.Locale.Tr "actions.general.collaborative_owners_management"}}
 	</h4>
-	{{if .CollaborativeOwners}}
+	{{if not .Repository.IsPrivate}}
+	<div class="ui attached segment">
+		{{ctx.Locale.Tr "actions.general.collaborative_owner_not_required"}}
+	</div>
+	{{else}}
+	{{if len .CollaborativeOwners}}
 	<div class="ui attached segment">
 		<div class="flex-list">
 			{{range .CollaborativeOwners}}
-				<div class="flex-item tw-items-center">
-					<div class="flex-item-leading">
-						<a href="{{.HomeLink}}">{{ctx.AvatarUtils.Avatar . 32}}</a>
-					</div>
-					<div class="flex-item-main">
-						<div class="flex-item-title">
-							{{template "shared/user/name" .}}
-						</div>
-					</div>
-					<div class="flex-item-trailing">
-						<button class="ui red tiny button inline delete-button" data-url="{{$.Link}}/collaborative_owner/delete" data-id="{{.ID}}">
-							{{ctx.Locale.Tr "remove"}}
-						</button>
+			<div class="flex-item tw-items-center">
+				<div class="flex-item-leading">
+					<a href="{{.HomeLink}}">{{ctx.AvatarUtils.Avatar . 32}}</a>
+				</div>
+				<div class="flex-item-main">
+					<div class="flex-item-title">
+						{{template "shared/user/name" .}}
 					</div>
 				</div>
+				<div class="flex-item-trailing">
+					<button class="ui red tiny button inline delete-button" data-url="{{$.Link}}/collaborative_owner/delete" data-id="{{.ID}}">
+						{{ctx.Locale.Tr "remove"}}
+					</button>
+				</div>
+			</div>
 			{{end}}
 		</div>
 	</div>
@@ -33,7 +38,10 @@
 			</div>
 			<button class="ui primary button">{{ctx.Locale.Tr "actions.general.add_collaborative_owner"}}</button>
 		</form>
+		<br>
+		{{ctx.Locale.Tr "actions.general.collaborative_owners_management_help"}}
 	</div>
+	{{end}}
 </div>
 
 <div class="ui g-modal-confirm delete modal">
