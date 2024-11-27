@@ -195,13 +195,12 @@ func httpBase(ctx *context.Context) *serviceHandler {
 					return nil
 				}
 				if task.RepoID != repo.ID {
-					actionsCfg := repo.MustGetUnit(ctx, unit.TypeActions).ActionsConfig()
-					taskRepo, err := repo_model.GetRepositoryByID(ctx, task.RepoID)
-					if err != nil {
-						ctx.ServerError("GetRepositoryByID", err)
+					if err := task.LoadRepository(ctx); err != nil {
+						ctx.ServerError("LoadRepository", err)
 						return nil
 					}
-					if !actionsCfg.IsCollaborativeOwner(taskRepo.OwnerID) || taskRepo.OwnerID != repo.OwnerID || !taskRepo.IsPrivate {
+					actionsCfg := repo.MustGetUnit(ctx, unit.TypeActions).ActionsConfig()
+					if !actionsCfg.IsCollaborativeOwner(task.Repo.OwnerID) || !task.Repo.IsPrivate {
 						// See https://docs.github.com/en/actions/sharing-automations/sharing-actions-and-workflows-from-your-private-repository
 						// Any actions or reusable workflows stored in the private repository can be used in
 						// workflows defined in other private repositories owned by the same organization or user.
