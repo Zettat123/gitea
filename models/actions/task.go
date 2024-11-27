@@ -158,7 +158,7 @@ func (task *ActionTask) LoadRepository(ctx context.Context) (err error) {
 		return nil
 	}
 	task.Repo, err = repo_model.GetRepositoryByID(ctx, task.RepoID)
-	return
+	return err
 }
 
 func GetTaskByID(ctx context.Context, id int64) (*ActionTask, error) {
