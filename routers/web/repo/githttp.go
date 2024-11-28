@@ -201,10 +201,8 @@ func httpBase(ctx *context.Context) *serviceHandler {
 					}
 					actionsCfg := repo.MustGetUnit(ctx, unit.TypeActions).ActionsConfig()
 					if !actionsCfg.IsCollaborativeOwner(task.Repo.OwnerID) || !task.Repo.IsPrivate {
-						// See https://docs.github.com/en/actions/sharing-automations/sharing-actions-and-workflows-from-your-private-repository
-						// Any actions or reusable workflows stored in the private repository can be used in
-						// workflows defined in other private repositories owned by the same organization or user.
-						// Actions and reusable workflows stored in private repositories cannot be used in public repositories.
+						// The task repo can access the current repo only if the task repo is private and
+						// the owner of the task repo is a collaborative owner of the current repo.
 						ctx.PlainText(http.StatusForbidden, "User permission denied")
 						return nil
 					}
