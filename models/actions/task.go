@@ -145,11 +145,7 @@ func (task *ActionTask) LoadAttributes(ctx context.Context) error {
 		task.Steps = steps
 	}
 
-	if err := task.LoadRepository(ctx); err != nil {
-		return err
-	}
-
-	return nil
+	return task.LoadRepository(ctx)
 }
 
 func (task *ActionTask) GenerateToken() (err error) {
