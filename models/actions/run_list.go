@@ -71,7 +71,6 @@ type FindRunOptions struct {
 	TriggerEvent     webhook_module.HookEventType
 	Approved         bool // not util.OptionalBool, it works only when it's true
 	Status           []Status
-	SortType         string
 	ConcurrencyGroup string
 }
 
@@ -108,14 +107,7 @@ func (opts FindRunOptions) ToConds() builder.Cond {
 }
 
 func (opts FindRunOptions) ToOrders() string {
-	switch opts.SortType {
-	case "oldest":
-		return "created ASC"
-	case "newest":
-		return "created DESC"
-	default:
-		return "`id` DESC"
-	}
+	return "`id` DESC"
 }
 
 type StatusInfo struct {
