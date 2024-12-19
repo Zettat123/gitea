@@ -164,10 +164,10 @@ jobs:
 
 func TestJobNeedsMatrix(t *testing.T) {
 	testCases := []struct {
-		treePath        string
-		fileContent     string
-		execPolicies    map[string]*taskExecPolicy
-		expectedOutputs map[string]map[string]string // jobID(string) => output(map[string]string)
+		treePath          string
+		fileContent       string
+		execPolicies      map[string]*taskExecPolicy
+		expectedTaskNeeds map[string]*runnerv1.TaskNeed // jobID => TaskNeed
 	}{
 		{
 			treePath: ".gitea/workflows/jobs-outputs-with-matrix.yml",
@@ -224,11 +224,14 @@ jobs:
 					},
 				},
 			},
-			expectedOutputs: map[string]map[string]string{
+			expectedTaskNeeds: map[string]*runnerv1.TaskNeed{
 				"job1": {
-					"output_1": "1",
-					"output_2": "2",
-					"output_3": "3",
+					Result: runnerv1.Result_RESULT_SUCCESS,
+					Outputs: map[string]string{
+						"output_1": "1",
+						"output_2": "2",
+						"output_3": "3",
+					},
 				},
 			},
 		},
@@ -255,12 +258,12 @@ jobs:
 					runner.execTask(t, task, policy)
 				}
 
-				job2Task := runner.fetchTask(t)
-				needs := job2Task.Needs
-				assert.Len(t, needs, len(tc.expectedOutputs))
-				for jobID, outputs := range tc.expectedOutputs {
-					assert.Len(t, needs[jobID].Outputs, len(outputs))
-					for outputKey, outputValue := range outputs {
+				task := runner.fetchTask(t)
+				needs := task.Needs
+				assert.Len(t, needs, len(tc.expectedTaskNeeds))
+				for jobID, tn := range tc.expectedTaskNeeds {
+					assert.Len(t, needs[jobID].Outputs, len(tn.Outputs))
+					for outputKey, outputValue := range tn.Outputs {
 						assert.Equal(t, outputValue, needs[jobID].Outputs[outputKey])
 					}
 				}
