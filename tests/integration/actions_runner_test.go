@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"reflect"
 	"testing"
 	"time"
 
@@ -148,7 +147,7 @@ func (r *mockRunner) execTask(t *testing.T, task *runnerv1.Task, policy *taskExe
 		}))
 		assert.NoError(t, err)
 		sentOutputKeys = append(sentOutputKeys, outputKey)
-		assert.True(t, reflect.DeepEqual(sentOutputKeys, resp.Msg.SentOutputs))
+		assert.ElementsMatch(t, sentOutputKeys, resp.Msg.SentOutputs)
 	}
 	time.Sleep(policy.execTime)
 	resp, err := r.client.runnerServiceClient.UpdateTask(context.Background(), connect.NewRequest(&runnerv1.UpdateTaskRequest{

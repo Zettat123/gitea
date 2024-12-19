@@ -101,8 +101,8 @@ jobs:
       - run: echo job1
   job2:
     runs-on: ubuntu-latest
-    needs: [job1]
     if: ${{ always() }}
+    needs: [job1]
     steps:
       - run: echo job2
 `,
@@ -238,6 +238,73 @@ jobs:
 				},
 			},
 		},
+		{
+			treePath: ".gitea/workflows/jobs-outputs-with-matrix-failure.yml",
+			fileContent: `name: jobs-outputs-with-matrix-failure
+on: 
+  push:
+    paths:
+      - '.gitea/workflows/jobs-outputs-with-matrix-failure.yml'
+jobs:
+  job1:
+    runs-on: ubuntu-latest
+    outputs:
+      output_1: ${{ steps.gen_output.outputs.output_1 }}
+      output_2: ${{ steps.gen_output.outputs.output_2 }}
+      output_3: ${{ steps.gen_output.outputs.output_3 }}
+    strategy:
+      matrix:
+        version: [1, 2, 3]
+    steps:
+      - name: Generate output
+        id: gen_output
+        run: |
+          version="${{ matrix.version }}"
+          echo "output_${version}=${version}" >> "$GITHUB_OUTPUT"          
+  job2:
+    runs-on: ubuntu-latest
+    if: ${{ always() }}
+    needs: [job1]
+    steps:
+      - run: echo '${{ toJSON(needs.job1.outputs) }}'
+`,
+			execPolicies: map[string]*taskExecPolicy{
+				"job1 (1)": {
+					result: runnerv1.Result_RESULT_SUCCESS,
+					outputs: map[string]string{
+						"output_1": "1",
+						"output_2": "",
+						"output_3": "",
+					},
+				},
+				"job1 (2)": {
+					result: runnerv1.Result_RESULT_FAILURE,
+					outputs: map[string]string{
+						"output_1": "",
+						"output_2": "",
+						"output_3": "",
+					},
+				},
+				"job1 (3)": {
+					result: runnerv1.Result_RESULT_SUCCESS,
+					outputs: map[string]string{
+						"output_1": "",
+						"output_2": "",
+						"output_3": "3",
+					},
+				},
+			},
+			expectedTaskNeeds: map[string]*runnerv1.TaskNeed{
+				"job1": {
+					Result: runnerv1.Result_RESULT_FAILURE,
+					Outputs: map[string]string{
+						"output_1": "1",
+						"output_2": "",
+						"output_3": "3",
+					},
+				},
+			},
+		},
 	}
 	onGiteaRun(t, func(t *testing.T, u *url.URL) {
 		user2 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2})
@@ -262,12 +329,14 @@ jobs:
 				}
 
 				task := runner.fetchTask(t)
-				needs := task.Needs
-				assert.Len(t, needs, len(tc.expectedTaskNeeds))
+				actualTaskNeeds := task.Needs
+				assert.Len(t, actualTaskNeeds, len(tc.expectedTaskNeeds))
 				for jobID, tn := range tc.expectedTaskNeeds {
-					assert.Len(t, needs[jobID].Outputs, len(tn.Outputs))
+					actualNeed := actualTaskNeeds[jobID]
+					assert.Equal(t, tn.Result, actualNeed.Result)
+					assert.Len(t, actualNeed.Outputs, len(tn.Outputs))
 					for outputKey, outputValue := range tn.Outputs {
-						assert.Equal(t, outputValue, needs[jobID].Outputs[outputKey])
+						assert.Equal(t, outputValue, actualNeed.Outputs[outputKey])
 					}
 				}
 			})
