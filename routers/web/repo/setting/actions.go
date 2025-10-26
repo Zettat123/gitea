@@ -11,6 +11,7 @@ import (
 	repo_model "code.gitea.io/gitea/models/repo"
 	unit_model "code.gitea.io/gitea/models/unit"
 	user_model "code.gitea.io/gitea/models/user"
+	git_module "code.gitea.io/gitea/modules/git"
 	"code.gitea.io/gitea/modules/templates"
 	"code.gitea.io/gitea/modules/util"
 	"code.gitea.io/gitea/services/context"
@@ -112,6 +113,60 @@ func DeleteCollaborativeOwner(ctx *context.Context) {
 		return
 	}
 	actionsCfg.RemoveCollaborativeOwner(ownerID)
+	if err := repo_model.UpdateRepoUnit(ctx, actionsUnit); err != nil {
+		ctx.ServerError("UpdateRepoUnit", err)
+		return
+	}
+
+	ctx.JSONOK()
+}
+
+func AddWorkflowDispatchRef(ctx *context.Context) {
+	ref := ctx.FormString("ref")
+
+	refName := git_module.RefName(ref)
+	if refName.IsTag() {
+		if !ctx.Repo.GitRepo.IsTagExist(string(refName)) {
+			ctx.Flash.Error(ctx.Tr("form.target_ref_not_exist", ref))
+			ctx.JSONErrorNotFound()
+			return
+		}
+	} else if refName.IsBranch() {
+		if !ctx.Repo.GitRepo.IsBranchExist(string(refName)) {
+			ctx.Flash.Error(ctx.Tr("form.target_ref_not_exist", ref))
+			ctx.JSONErrorNotFound()
+			return
+		}
+	} else {
+		ctx.ServerError("UnsupportedRefType", nil)
+		return
+	}
+
+	actionsUnit, err := ctx.Repo.Repository.GetUnit(ctx, unit_model.TypeActions)
+	if err != nil {
+		ctx.ServerError("GetUnit", err)
+		return
+	}
+	actionsCfg := actionsUnit.ActionsConfig()
+	actionsCfg.AddWorkflowDispatchRef(ref)
+	if err := repo_model.UpdateRepoUnit(ctx, actionsUnit); err != nil {
+		ctx.ServerError("UpdateRepoUnit", err)
+		return
+	}
+
+	ctx.JSONOK()
+}
+
+func DeleteWorkflowDispatchRef(ctx *context.Context) {
+	ref := ctx.FormString("ref")
+
+	actionsUnit, err := ctx.Repo.Repository.GetUnit(ctx, unit_model.TypeActions)
+	if err != nil {
+		ctx.ServerError("GetUnit", err)
+		return
+	}
+	actionsCfg := actionsUnit.ActionsConfig()
+	actionsCfg.RemoveWorkflowDispatchRef(ref)
 	if err := repo_model.UpdateRepoUnit(ctx, actionsUnit); err != nil {
 		ctx.ServerError("UpdateRepoUnit", err)
 		return

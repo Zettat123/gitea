@@ -173,6 +173,7 @@ type ActionsConfig struct {
 	// CollaborativeOwnerIDs is a list of owner IDs used to share actions from private repos.
 	// Only workflows from the private repos whose owners are in CollaborativeOwnerIDs can access the current repo's actions.
 	CollaborativeOwnerIDs []int64
+	WorkflowDispatchRefs  []string
 }
 
 func (cfg *ActionsConfig) EnableWorkflow(file string) {
@@ -203,6 +204,16 @@ func (cfg *ActionsConfig) AddCollaborativeOwner(ownerID int64) {
 
 func (cfg *ActionsConfig) RemoveCollaborativeOwner(ownerID int64) {
 	cfg.CollaborativeOwnerIDs = util.SliceRemoveAll(cfg.CollaborativeOwnerIDs, ownerID)
+}
+
+func (cfg *ActionsConfig) AddWorkflowDispatchRef(ref string) {
+	if !slices.Contains(cfg.WorkflowDispatchRefs, ref) {
+		cfg.WorkflowDispatchRefs = append(cfg.WorkflowDispatchRefs, ref)
+	}
+}
+
+func (cfg *ActionsConfig) RemoveWorkflowDispatchRef(ref string) {
+	cfg.WorkflowDispatchRefs = util.SliceRemoveAll(cfg.WorkflowDispatchRefs, ref)
 }
 
 func (cfg *ActionsConfig) IsCollaborativeOwner(ownerID int64) bool {
