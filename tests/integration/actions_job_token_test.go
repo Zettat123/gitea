@@ -1072,44 +1072,42 @@ func testActionsTokenPermission(t *testing.T, token string, repo *repo_model.Rep
 			})
 
 		case unit_model.TypePackages:
+			// Prepare a generic package owned by the repo owner using the owner's token (not the task token).
+			packageName := fmt.Sprintf("test-pkg-%d", time.Now().UnixNano())
+			baseVersion := "1.0.0"
+			baseFileName := "read-test.bin"
+			baseContent := []byte("read package content")
+			baseUploadURL := fmt.Sprintf("/api/packages/%s/generic/%s/%s/%s", repo.OwnerName, packageName, baseVersion, baseFileName)
+			baseUploadReq := NewRequestWithBody(t, "PUT", baseUploadURL, bytes.NewReader(baseContent)).
+				AddBasicAuth(repo.OwnerName)
+			MakeRequest(t, baseUploadReq, http.StatusCreated)
+
+			pkg := unittest.AssertExistsAndLoadBean(t, &packages_model.Package{
+				OwnerID: repo.OwnerID,
+				Type:    packages_model.TypeGeneric,
+				Name:    packageName,
+			})
+			linkReq := NewRequest(t, "POST", fmt.Sprintf("/api/v1/packages/%s/generic/%s/-/link/%s", repo.OwnerName, pkg.Name, repo.Name)).
+				AddBasicAuth(repo.OwnerName)
+			MakeRequest(t, linkReq, http.StatusCreated)
+			t.Cleanup(func() {
+				deleteReq := NewRequest(t, "DELETE", baseUploadURL).AddBasicAuth(repo.OwnerName)
+				MakeRequest(t, deleteReq, http.StatusNoContent)
+			})
+
 			t.Run("Packages Read", func(t *testing.T) {
-				// Prepare a generic package owned by the repo owner using the owner's token (not the task token)
-				packageName := fmt.Sprintf("test-pkg-read-%d", time.Now().UnixNano())
-				packageVersion := "1.0.0"
-				fileName := "read-test.bin"
-				content := []byte("read package content")
-				uploadURL := fmt.Sprintf("/api/packages/%s/generic/%s/%s/%s", repo.OwnerName, packageName, packageVersion, fileName)
-				uploadReq := NewRequestWithBody(t, "PUT", uploadURL, bytes.NewReader(content)).
-					AddBasicAuth(repo.OwnerName)
-				MakeRequest(t, uploadReq, http.StatusCreated)
-
-				// Link the package to the repo
-				pkg := unittest.AssertExistsAndLoadBean(t, &packages_model.Package{
-					OwnerID: repo.OwnerID,
-					Type:    packages_model.TypeGeneric,
-					Name:    packageName,
-				})
-				linkReq := NewRequest(t, "POST", fmt.Sprintf("/api/v1/packages/%s/generic/%s/-/link/%s", repo.OwnerName, pkg.Name, repo.Name)).
-					AddBasicAuth(repo.OwnerName)
-				MakeRequest(t, linkReq, http.StatusCreated)
-
 				expectedCode := http.StatusOK
 				if accessMode == perm_model.AccessModeNone {
 					expectedCode = http.StatusUnauthorized
 				}
 				// Read uses bearer token auth against the packages API (not /api/v1).
-				readReq := NewRequest(t, "GET", uploadURL)
+				readReq := NewRequest(t, "GET", baseUploadURL)
 				readReq.Header.Set("Authorization", "Bearer "+token)
 				MakeRequest(t, readReq, expectedCode)
-
-				// Cleanup via owner basic auth to avoid depending on actions token write rights.
-				deleteReq := NewRequest(t, "DELETE", uploadURL).AddBasicAuth(repo.OwnerName)
-				MakeRequest(t, deleteReq, http.StatusNoContent)
 			})
 			t.Run("Packages Write", func(t *testing.T) {
 				// Write path uses bearer auth and expects success only with write access.
-				packageName := fmt.Sprintf("test-pkg-write-%d", time.Now().UnixNano())
-				packageVersion := "1.0.0"
+				packageVersion := "2.0.0"
 				fileName := "write-test.bin"
 				content := []byte("write package content")
 				uploadURL := fmt.Sprintf("/api/packages/%s/generic/%s/%s/%s", repo.OwnerName, packageName, packageVersion, fileName)
@@ -1123,11 +1121,11 @@ func testActionsTokenPermission(t *testing.T, token string, repo *repo_model.Rep
 				MakeRequest(t, writeReq, expectedCode)
 
 				if expectedCode == http.StatusCreated {
-					// Cleanup via owner basic auth to avoid leaking packages across test cases.
 					deleteReq := NewRequest(t, "DELETE", uploadURL).AddBasicAuth(repo.OwnerName)
 					MakeRequest(t, deleteReq, http.StatusNoContent)
 				}
 			})
+
 		}
 	}
 
