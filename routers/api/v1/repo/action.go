@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -554,6 +553,11 @@ func (Action) ListRunners(ctx *context.APIContext) {
 	//   description: name of the repo
 	//   type: string
 	//   required: true
+	// - name: disabled
+	//   in: query
+	//   description: filter by disabled status (true or false)
+	//   type: boolean
+	//   required: false
 	// responses:
 	//   "200":
 	//     "$ref": "#/definitions/ActionRunnersResponse"
@@ -564,11 +568,11 @@ func (Action) ListRunners(ctx *context.APIContext) {
 	shared.ListRunners(ctx, 0, ctx.Repo.Repository.ID)
 }
 
-// GetRunner get an repo-level runner
+// GetRunner get a repo-level runner
 func (Action) GetRunner(ctx *context.APIContext) {
 	// swagger:operation GET /repos/{owner}/{repo}/actions/runners/{runner_id} repository getRepoRunner
 	// ---
-	// summary: Get an repo-level runner
+	// summary: Get a repo-level runner
 	// produces:
 	// - application/json
 	// parameters:
@@ -597,11 +601,11 @@ func (Action) GetRunner(ctx *context.APIContext) {
 	shared.GetRunner(ctx, 0, ctx.Repo.Repository.ID, ctx.PathParamInt64("runner_id"))
 }
 
-// DeleteRunner delete an repo-level runner
+// DeleteRunner delete a repo-level runner
 func (Action) DeleteRunner(ctx *context.APIContext) {
 	// swagger:operation DELETE /repos/{owner}/{repo}/actions/runners/{runner_id} repository deleteRepoRunner
 	// ---
-	// summary: Delete an repo-level runner
+	// summary: Delete a repo-level runner
 	// produces:
 	// - application/json
 	// parameters:
@@ -628,6 +632,47 @@ func (Action) DeleteRunner(ctx *context.APIContext) {
 	//   "404":
 	//     "$ref": "#/responses/notFound"
 	shared.DeleteRunner(ctx, 0, ctx.Repo.Repository.ID, ctx.PathParamInt64("runner_id"))
+}
+
+// UpdateRunner update a repo-level runner
+func (Action) UpdateRunner(ctx *context.APIContext) {
+	// swagger:operation PATCH /repos/{owner}/{repo}/actions/runners/{runner_id} repository updateRepoRunner
+	// ---
+	// summary: Update a repo-level runner
+	// consumes:
+	// - application/json
+	// produces:
+	// - application/json
+	// parameters:
+	// - name: owner
+	//   in: path
+	//   description: owner of the repo
+	//   type: string
+	//   required: true
+	// - name: repo
+	//   in: path
+	//   description: name of the repo
+	//   type: string
+	//   required: true
+	// - name: runner_id
+	//   in: path
+	//   description: id of the runner
+	//   type: string
+	//   required: true
+	// - name: body
+	//   in: body
+	//   schema:
+	//     "$ref": "#/definitions/EditActionRunnerOption"
+	// responses:
+	//   "200":
+	//     "$ref": "#/definitions/ActionRunner"
+	//   "400":
+	//     "$ref": "#/responses/error"
+	//   "404":
+	//     "$ref": "#/responses/notFound"
+	//   "422":
+	//     "$ref": "#/responses/validationError"
+	shared.UpdateRunner(ctx, 0, ctx.Repo.Repository.ID, ctx.PathParamInt64("runner_id"))
 }
 
 // GetWorkflowRunJobs Lists all jobs for a workflow run.
@@ -1111,20 +1156,6 @@ func getCurrentRepoActionRunByID(ctx *context.APIContext) *actions_model.ActionR
 	return run
 }
 
-func getCurrentRepoActionRunJobsByID(ctx *context.APIContext) (*actions_model.ActionRun, actions_model.ActionJobList) {
-	run := getCurrentRepoActionRunByID(ctx)
-	if ctx.Written() {
-		return nil, nil
-	}
-
-	jobs, err := actions_model.GetRunJobsByRunID(ctx, run.ID)
-	if err != nil {
-		ctx.APIErrorInternal(err)
-		return nil, nil
-	}
-	return run, jobs
-}
-
 // GetWorkflowRun Gets a specific workflow run.
 func GetWorkflowRun(ctx *context.APIContext) {
 	// swagger:operation GET /repos/{owner}/{repo}/actions/runs/{run} repository GetWorkflowRun
@@ -1204,13 +1235,16 @@ func RerunWorkflowRun(ctx *context.APIContext) {
 	//   "422":
 	//     "$ref": "#/responses/validationError"
 
-	run, jobs := getCurrentRepoActionRunJobsByID(ctx)
-	if ctx.Written() {
+	runID := ctx.PathParamInt64("run")
+
+	if err := actions_service.RerunWorkflowRunJobs(ctx, ctx.Repo.Repository, runID, 0); err != nil {
+		handleWorkflowRerunError(ctx, err)
 		return
 	}
 
-	if err := actions_service.RerunWorkflowRunJobs(ctx, ctx.Repo.Repository, run, jobs, nil); err != nil {
-		handleWorkflowRerunError(ctx, err)
+	run, err := actions_model.GetRunByRepoAndID(ctx, ctx.Repo.Repository.ID, runID)
+	if err != nil {
+		ctx.APIErrorInternal(err)
 		return
 	}
 
@@ -1262,21 +1296,22 @@ func RerunWorkflowJob(ctx *context.APIContext) {
 	//   "422":
 	//     "$ref": "#/responses/validationError"
 
-	run, jobs := getCurrentRepoActionRunJobsByID(ctx)
-	if ctx.Written() {
+	runID := ctx.PathParamInt64("run")
+	jobIDStr := ctx.PathParam("job_id")
+	jobID, err := strconv.ParseInt(jobIDStr, 10, 64)
+	if err != nil || jobID <= 0 {
+		ctx.APIError(http.StatusBadRequest, "invalid job_id")
 		return
 	}
 
-	jobID := ctx.PathParamInt64("job_id")
-	jobIdx := slices.IndexFunc(jobs, func(job *actions_model.ActionRunJob) bool { return job.ID == jobID })
-	if jobIdx == -1 {
-		ctx.APIErrorNotFound(util.NewNotExistErrorf("workflow job with id %d", jobID))
-		return
-	}
-
-	targetJob := jobs[jobIdx]
-	if err := actions_service.RerunWorkflowRunJobs(ctx, ctx.Repo.Repository, run, jobs, targetJob); err != nil {
+	if err := actions_service.RerunWorkflowRunJobs(ctx, ctx.Repo.Repository, runID, jobID); err != nil {
 		handleWorkflowRerunError(ctx, err)
+		return
+	}
+
+	targetJob, err := actions_model.GetRunJobByRepoAndID(ctx, ctx.Repo.Repository.ID, jobID)
+	if err != nil {
+		ctx.APIErrorInternal(err)
 		return
 	}
 
@@ -1291,6 +1326,9 @@ func RerunWorkflowJob(ctx *context.APIContext) {
 func handleWorkflowRerunError(ctx *context.APIContext, err error) {
 	if errors.Is(err, util.ErrInvalidArgument) {
 		ctx.APIError(http.StatusBadRequest, err)
+		return
+	} else if errors.Is(err, util.ErrNotExist) {
+		ctx.APIError(http.StatusNotFound, err)
 		return
 	}
 	ctx.APIErrorInternal(err)

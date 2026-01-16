@@ -51,6 +51,12 @@ type ActionRunJob struct {
 	ConcurrencyGroup  string `xorm:"index(repo_concurrency) NOT NULL DEFAULT ''"` // evaluated concurrency.group
 	ConcurrencyCancel bool   `xorm:"NOT NULL DEFAULT FALSE"`                      // evaluated concurrency.cancel-in-progress
 
+	// ChildRunID == 0: the job is a regular job without a child run.
+	// ChildRunID == -1, the job uses a reusable workflow but the child run has not yet been created. (For example, the job is currently blocked and will only create the child run after transitioning to waiting)
+	// ChildRunID > 0, the child run has been created and the value represents that child run's ID.
+	ChildRunID int64      `xorm:"INDEX NOT NULL DEFAULT 0"`
+	ChildRun   *ActionRun `xorm:"-"`
+
 	Started timeutil.TimeStamp
 	Stopped timeutil.TimeStamp
 	Created timeutil.TimeStamp `xorm:"created"`
@@ -76,6 +82,19 @@ func (job *ActionRunJob) LoadRun(ctx context.Context) error {
 	return nil
 }
 
+func (job *ActionRunJob) LoadChildRun(ctx context.Context) error {
+	if job.ChildRunID <= 0 || job.ChildRun != nil {
+		return nil
+	}
+
+	childRun, err := GetRunByRepoAndID(ctx, job.RepoID, job.ChildRunID)
+	if err != nil {
+		return err
+	}
+	job.ChildRun = childRun
+	return job.ChildRun.LoadAttributes(ctx)
+}
+
 func (job *ActionRunJob) LoadRepo(ctx context.Context) error {
 	if job.Repo == nil {
 		repo, err := repo_model.GetRepositoryByID(ctx, job.RepoID)
@@ -94,6 +113,10 @@ func (job *ActionRunJob) LoadAttributes(ctx context.Context) error {
 	}
 
 	if err := job.LoadRun(ctx); err != nil {
+		return err
+	}
+
+	if err := job.LoadChildRun(ctx); err != nil {
 		return err
 	}
 
@@ -128,6 +151,35 @@ func GetRunJobByRepoAndID(ctx context.Context, repoID, jobID int64) (*ActionRunJ
 	}
 
 	return &job, nil
+}
+
+// GetRootRunIDByRepoAndJobID returns the root run ID for the given job.
+// For reusable workflows, a job may belong to a child run (ActionRun.ParentJobID > 0). This function walks up
+// the ActionRun.ParentJobID chain until it reaches the root run (ActionRun.ParentJobID == 0).
+func GetRootRunIDByRepoAndJobID(ctx context.Context, repoID, jobID int64) (int64, error) {
+	job, err := GetRunJobByRepoAndID(ctx, repoID, jobID)
+	if err != nil {
+		return 0, err
+	}
+
+	run, err := GetRunByRepoAndID(ctx, repoID, job.RunID)
+	if err != nil {
+		return 0, err
+	}
+
+	for run.ParentJobID > 0 {
+		parentJob, err := GetRunJobByRepoAndID(ctx, repoID, run.ParentJobID)
+		if err != nil {
+			return 0, err
+		}
+
+		run, err = GetRunByRepoAndID(ctx, repoID, parentJob.RunID)
+		if err != nil {
+			return 0, err
+		}
+	}
+
+	return run.ID, nil
 }
 
 func GetRunJobByRunAndID(ctx context.Context, runID, jobID int64) (*ActionRunJob, error) {

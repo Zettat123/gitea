@@ -9,4 +9,6 @@ export type ActionsJob = {
   canRerun: boolean;
   needs?: string[];
   duration: string;
+  link?: string;
+  children?: ActionsJob[];
 };

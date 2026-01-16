@@ -52,7 +52,7 @@ func View(ctx *context_module.Context) {
 	ctx.Data["PageIsActions"] = true
 	runID := getRunID(ctx)
 
-	_, _, current := getRunJobsAndCurrentJob(ctx, runID)
+	_, _, current := getRootRunJobsAndCurrentJob(ctx, runID)
 	if ctx.Written() {
 		return
 	}
@@ -66,13 +66,19 @@ func View(ctx *context_module.Context) {
 
 func ViewWorkflowFile(ctx *context_module.Context) {
 	runID := getRunID(ctx)
-	run, err := actions_model.GetRunByRepoAndID(ctx, ctx.Repo.Repository.ID, runID)
+	requestedRun, err := actions_model.GetRunByRepoAndID(ctx, ctx.Repo.Repository.ID, runID)
 	if err != nil {
 		ctx.NotFoundOrServerError("GetRunByRepoAndID", func(err error) bool {
 			return errors.Is(err, util.ErrNotExist)
 		}, err)
 		return
 	}
+	if requestedRun.ParentJobID > 0 {
+		// If the requested run is a child run, do not display its workflow file, as the workflow file may come from an external source.
+		ctx.NotFound(nil)
+		return
+	}
+	run := requestedRun
 	commit, err := ctx.Repo.GitRepo.GetCommit(run.CommitSHA)
 	if err != nil {
 		ctx.NotFoundOrServerError("GetCommit", func(err error) bool {
@@ -127,13 +133,17 @@ type ViewResponse struct {
 			WorkflowID        string        `json:"workflowID"`
 			WorkflowLink      string        `json:"workflowLink"`
 			IsSchedule        bool          `json:"isSchedule"`
+			ParentJobLink     string        `json:"parentJobLink"`
+			ParentJobDisplay  string        `json:"parentJobDisplay"`
 			Jobs              []*ViewJob    `json:"jobs"`
 			Commit            ViewCommit    `json:"commit"`
 		} `json:"run"`
 		CurrentJob struct {
-			Title  string         `json:"title"`
-			Detail string         `json:"detail"`
-			Steps  []*ViewJobStep `json:"steps"`
+			Title         string         `json:"title"`
+			Detail        string         `json:"detail"`
+			ChildRunLink  string         `json:"childRunLink"`
+			ChildRunIndex int64          `json:"childRunIndex"`
+			Steps         []*ViewJobStep `json:"steps"`
 		} `json:"currentJob"`
 	} `json:"state"`
 	Logs struct {
@@ -142,13 +152,15 @@ type ViewResponse struct {
 }
 
 type ViewJob struct {
-	ID       int64    `json:"id"`
-	JobID    string   `json:"jobId,omitempty"`
-	Name     string   `json:"name"`
-	Status   string   `json:"status"`
-	CanRerun bool     `json:"canRerun"`
-	Duration string   `json:"duration"`
-	Needs    []string `json:"needs,omitempty"`
+	ID       int64      `json:"id"`
+	JobID    string     `json:"jobId,omitempty"`
+	Name     string     `json:"name"`
+	Status   string     `json:"status"`
+	CanRerun bool       `json:"canRerun"`
+	Duration string     `json:"duration"`
+	Needs    []string   `json:"needs,omitempty"`
+	Link     string     `json:"link"`
+	Children []*ViewJob `json:"children,omitempty"`
 }
 
 type ViewCommit struct {
@@ -211,7 +223,7 @@ func ViewPost(ctx *context_module.Context) {
 	req := web.GetForm(ctx).(*ViewRequest)
 	runID := getRunID(ctx)
 
-	run, jobs, current := getRunJobsAndCurrentJob(ctx, runID)
+	run, jobs, current := getRootRunJobsAndCurrentJob(ctx, runID)
 	if ctx.Written() {
 		return
 	}
@@ -242,10 +254,36 @@ func ViewPost(ctx *context_module.Context) {
 	resp.State.Run.WorkflowID = run.WorkflowID
 	resp.State.Run.WorkflowLink = run.WorkflowLink()
 	resp.State.Run.IsSchedule = run.IsSchedule()
+	if run.ParentJobID > 0 {
+		if err := run.LoadParentJob(ctx); err != nil {
+			ctx.ServerError("LoadParentJob", err)
+			return
+		}
+		if err := run.ParentJob.LoadAttributes(ctx); err != nil {
+			ctx.ServerError("LoadAttributes", err)
+			return
+		}
+		parentJobs, err := actions_model.GetRunJobsByRunID(ctx, run.ParentJob.RunID)
+		if err != nil {
+			ctx.ServerError("GetRunJobsByRunID", err)
+			return
+		}
+		parentJobIndex := -1
+		for i, pj := range parentJobs {
+			if pj.ID == run.ParentJob.ID {
+				parentJobIndex = i
+				break
+			}
+		}
+		if parentJobIndex >= 0 {
+			resp.State.Run.ParentJobLink = fmt.Sprintf("%s/jobs/%d", run.ParentJob.Run.Link(), parentJobIndex)
+			resp.State.Run.ParentJobDisplay = fmt.Sprintf("#%d / %s", run.ParentJob.Run.Index, run.ParentJob.Name)
+		}
+	}
 	resp.State.Run.Jobs = make([]*ViewJob, 0, len(jobs)) // marshal to '[]' instead fo 'null' in json
 	resp.State.Run.Status = run.Status.String()
 	for _, v := range jobs {
-		resp.State.Run.Jobs = append(resp.State.Run.Jobs, &ViewJob{
+		viewJob := &ViewJob{
 			ID:       v.ID,
 			JobID:    v.JobID,
 			Name:     v.Name,
@@ -253,7 +291,17 @@ func ViewPost(ctx *context_module.Context) {
 			CanRerun: resp.State.Run.CanRerun,
 			Duration: v.Duration().String(),
 			Needs:    v.Needs,
-		})
+			Link:     fmt.Sprintf("%s/jobs/%d", run.Link(), v.ID),
+		}
+		if v.ChildRunID > 0 {
+			children, err := buildRunJobsTree(ctx, ctx.Repo.Repository, run.Link(), v, ctx.Repo.CanWrite(unit.TypeActions))
+			if err != nil {
+				ctx.ServerError("buildRunJobsTree", err)
+				return
+			}
+			viewJob.Children = children
+		}
+		resp.State.Run.Jobs = append(resp.State.Run.Jobs, viewJob)
 	}
 
 	pusher := ViewUser{
@@ -301,6 +349,23 @@ func ViewPost(ctx *context_module.Context) {
 	if run.NeedApproval {
 		resp.State.CurrentJob.Detail = ctx.Locale.TrString("actions.need_approval_desc")
 	}
+	if current.ChildRunID > 0 {
+		if err := current.LoadChildRun(ctx); err != nil {
+			log.Error("LoadChildRun: %v", err)
+		} else {
+			childJobs, err := actions_model.GetRunJobsByRunID(ctx, current.ChildRunID)
+			if err != nil {
+				ctx.ServerError("GetRunJobsByRunID", err)
+				return
+			}
+			if len(childJobs) > 0 {
+				resp.State.CurrentJob.ChildRunLink = fmt.Sprintf("%s/jobs/%d", run.Link(), childJobs[0].ID)
+			} else {
+				resp.State.CurrentJob.ChildRunLink = run.Link()
+			}
+			resp.State.CurrentJob.ChildRunIndex = current.ChildRun.Index
+		}
+	}
 	resp.State.CurrentJob.Steps = make([]*ViewJobStep, 0) // marshal to '[]' instead fo 'null' in json
 	resp.Logs.StepsLog = make([]*ViewStepLog, 0)          // marshal to '[]' instead fo 'null' in json
 	if task != nil {
@@ -314,6 +379,43 @@ func ViewPost(ctx *context_module.Context) {
 	}
 
 	ctx.JSON(http.StatusOK, resp)
+}
+
+func buildRunJobsTree(ctx context.Context, repo *repo_model.Repository, rootRunLink string, parentJob *actions_model.ActionRunJob, canWriteActions bool) ([]*ViewJob, error) {
+	if err := parentJob.LoadChildRun(ctx); err != nil {
+		return nil, err
+	}
+	childRun := parentJob.ChildRun
+	childRun.Repo = repo
+	childCanRerun := canWriteActions && childRun.Status.IsDone()
+
+	childJobs, err := actions_model.GetRunJobsByRunID(ctx, childRun.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	viewJobs := make([]*ViewJob, 0, len(childJobs))
+	for _, job := range childJobs {
+		viewJob := &ViewJob{
+			ID:       job.ID,
+			JobID:    job.JobID,
+			Name:     job.Name,
+			Status:   job.Status.String(),
+			CanRerun: childCanRerun,
+			Duration: job.Duration().String(),
+			Needs:    job.Needs,
+			Link:     fmt.Sprintf("%s/jobs/%d", rootRunLink, job.ID),
+		}
+		if job.ChildRunID > 0 {
+			grandChildren, err := buildRunJobsTree(ctx, repo, rootRunLink, job, canWriteActions)
+			if err != nil {
+				return nil, err
+			}
+			viewJob.Children = grandChildren
+		}
+		viewJobs = append(viewJobs, viewJob)
+	}
+	return viewJobs, nil
 }
 
 func convertToViewModel(ctx context.Context, locale translation.Locale, cursors []LogCursor, task *actions_model.ActionTask) ([]*ViewJobStep, []*ViewStepLog, error) {
@@ -399,36 +501,29 @@ func convertToViewModel(ctx context.Context, locale translation.Locale, cursors 
 }
 
 // Rerun will rerun jobs in the given run
-// If jobIDStr is a blank string, it means rerun all jobs
+// If jobID is 0 (no job param provided), it means rerun all jobs.
 func Rerun(ctx *context_module.Context) {
 	runID := getRunID(ctx)
-
-	run, jobs, currentJob := getRunJobsAndCurrentJob(ctx, runID)
-	if ctx.Written() {
-		return
+	jobIDStr := ctx.PathParam("job")
+	var jobID int64
+	if jobIDStr != "" {
+		var err error
+		jobID, err = strconv.ParseInt(jobIDStr, 10, 64)
+		if err != nil || jobID <= 0 {
+			ctx.JSONError("invalid job_id")
+			return
+		}
 	}
 
-	// rerun is not allowed if the run is not done
-	if !run.Status.IsDone() {
-		ctx.JSONError(ctx.Locale.Tr("actions.runs.not_done"))
-		return
-	}
-
-	// can not rerun job when workflow is disabled
-	cfgUnit := ctx.Repo.Repository.MustGetUnit(ctx, unit.TypeActions)
-	cfg := cfgUnit.ActionsConfig()
-	if cfg.IsWorkflowDisabled(run.WorkflowID) {
-		ctx.JSONError(ctx.Locale.Tr("actions.workflow.disabled"))
-		return
-	}
-
-	var targetJob *actions_model.ActionRunJob // nil means rerun all jobs
-	if ctx.PathParam("job") != "" {
-		targetJob = currentJob
-	}
-
-	if err := actions_service.RerunWorkflowRunJobs(ctx, ctx.Repo.Repository, run, jobs, targetJob); err != nil {
-		ctx.ServerError("RerunWorkflowRunJobs", err)
+	if err := actions_service.RerunWorkflowRunJobs(ctx, ctx.Repo.Repository, runID, jobID); err != nil {
+		switch {
+		case errors.Is(err, util.ErrInvalidArgument):
+			ctx.JSONError(err.Error())
+		case errors.Is(err, util.ErrNotExist):
+			ctx.NotFound(nil)
+		default:
+			ctx.ServerError("RerunWorkflowRunJobs", err)
+		}
 		return
 	}
 
@@ -437,17 +532,13 @@ func Rerun(ctx *context_module.Context) {
 
 func Logs(ctx *context_module.Context) {
 	runID := getRunID(ctx)
-	jobID := ctx.PathParamInt64("job")
 
-	run, err := actions_model.GetRunByRepoAndID(ctx, ctx.Repo.Repository.ID, runID)
-	if err != nil {
-		ctx.NotFoundOrServerError("GetRunByRepoAndID", func(err error) bool {
-			return errors.Is(err, util.ErrNotExist)
-		}, err)
+	_, _, job := getRootRunJobsAndCurrentJob(ctx, runID)
+	if ctx.Written() {
 		return
 	}
 
-	if err = common.DownloadActionsRunJobLogsWithID(ctx.Base, ctx.Repo.Repository, run.ID, jobID); err != nil {
+	if err := common.DownloadActionsRunJobLogsWithID(ctx.Base, ctx.Repo.Repository, job.RunID, job.ID); err != nil {
 		ctx.NotFoundOrServerError("DownloadActionsRunJobLogsWithID", func(err error) bool {
 			return errors.Is(err, util.ErrNotExist)
 		}, err)
@@ -457,7 +548,7 @@ func Logs(ctx *context_module.Context) {
 func Cancel(ctx *context_module.Context) {
 	runID := getRunID(ctx)
 
-	run, jobs, _ := getRunJobsAndCurrentJob(ctx, runID)
+	run, jobs, _ := getRootRunJobsAndCurrentJob(ctx, runID)
 	if ctx.Written() {
 		return
 	}
@@ -594,45 +685,67 @@ func Delete(ctx *context_module.Context) {
 	ctx.JSONOK()
 }
 
-// getRunJobsAndCurrentJob loads the run and its jobs for runID, and returns the selected job based on the optional "job" path param (or the first job by default).
+// getRootRunJobsAndCurrentJob loads the run and its jobs for the requested runID.
+// The requested runID must refer to a root run (ParentJobID == 0), otherwise it returns 404.
+// It resolves the selected job based on the optional "job" path param, which may refer to a job from this root run or any nested child run.
 // Any error will be written to the ctx, and nils are returned in that case.
-func getRunJobsAndCurrentJob(ctx *context_module.Context, runID int64) (*actions_model.ActionRun, []*actions_model.ActionRunJob, *actions_model.ActionRunJob) {
-	run, err := actions_model.GetRunByRepoAndID(ctx, ctx.Repo.Repository.ID, runID)
+func getRootRunJobsAndCurrentJob(ctx *context_module.Context, requestedRunID int64) (*actions_model.ActionRun, []*actions_model.ActionRunJob, *actions_model.ActionRunJob) {
+	repoID := ctx.Repo.Repository.ID
+	requestedRun, err := actions_model.GetRunByRepoAndID(ctx, repoID, requestedRunID)
 	if err != nil {
 		ctx.NotFoundOrServerError("GetRunByRepoAndID", func(err error) bool {
 			return errors.Is(err, util.ErrNotExist)
 		}, err)
 		return nil, nil, nil
 	}
-	run.Repo = ctx.Repo.Repository
-	jobs, err := actions_model.GetRunJobsByRunID(ctx, run.ID)
-	if err != nil {
-		ctx.ServerError("GetRunJobsByRunID", err)
-		return nil, nil, nil
-	}
-	if len(jobs) == 0 {
+	if requestedRun.ParentJobID > 0 {
+		// The requested run must be a root run.
 		ctx.NotFound(nil)
 		return nil, nil, nil
 	}
 
-	for _, job := range jobs {
-		job.Run = run
+	rootRun := requestedRun
+	rootRun.Repo = ctx.Repo.Repository
+
+	rootRunJobs, err := actions_model.GetRunJobsByRunID(ctx, rootRun.ID)
+	if err != nil {
+		ctx.ServerError("GetRunJobsByRunID", err)
+		return nil, nil, nil
+	}
+	if len(rootRunJobs) == 0 {
+		ctx.NotFound(nil)
+		return nil, nil, nil
 	}
 
-	current := jobs[0]
+	for _, job := range rootRunJobs {
+		job.Run = rootRun
+	}
+
+	current := rootRunJobs[0]
 	if ctx.PathParam("job") != "" {
 		jobID := ctx.PathParamInt64("job")
-		current, err = actions_model.GetRunJobByRunAndID(ctx, run.ID, jobID)
+		jobRootRunID, err := actions_model.GetRootRunIDByRepoAndJobID(ctx, repoID, jobID)
 		if err != nil {
-			ctx.NotFoundOrServerError("GetRunJobByRunAndID", func(err error) bool {
+			ctx.NotFoundOrServerError("GetRootRunIDByRepoAndJobID", func(err error) bool {
 				return errors.Is(err, util.ErrNotExist)
 			}, err)
 			return nil, nil, nil
 		}
-		current.Run = run
+		if jobRootRunID != rootRun.ID {
+			ctx.NotFound(nil)
+			return nil, nil, nil
+		}
+		targetJob, err := actions_model.GetRunJobByRepoAndID(ctx, repoID, jobID)
+		if err != nil {
+			ctx.NotFoundOrServerError("GetRunJobByRepoAndID", func(err error) bool {
+				return errors.Is(err, util.ErrNotExist)
+			}, err)
+			return nil, nil, nil
+		}
+		current = targetJob
 	}
 
-	return run, jobs, current
+	return rootRun, rootRunJobs, current
 }
 
 func ArtifactsDeleteView(ctx *context_module.Context) {

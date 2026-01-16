@@ -12,7 +12,9 @@ import (
 	actions_model "code.gitea.io/gitea/models/actions"
 	auth_model "code.gitea.io/gitea/models/auth"
 	"code.gitea.io/gitea/models/db"
+	repo_model "code.gitea.io/gitea/models/repo"
 	"code.gitea.io/gitea/models/unittest"
+	user_model "code.gitea.io/gitea/models/user"
 	"code.gitea.io/gitea/modules/structs"
 	"code.gitea.io/gitea/modules/util"
 
@@ -30,11 +32,21 @@ func TestActionsJobTokenAccess(t *testing.T) {
 func testActionsJobTokenAccess(u *url.URL, isFork bool) func(t *testing.T) {
 	return func(t *testing.T) {
 		task := unittest.AssertExistsAndLoadBean(t, &actions_model.ActionTask{ID: 47})
+		require.NoError(t, task.LoadAttributes(t.Context()))
 		require.NoError(t, task.GenerateToken())
 		task.Status = actions_model.StatusRunning
 		task.IsForkPullRequest = isFork
 		err := actions_model.UpdateTask(t.Context(), task, "token_hash", "token_salt", "token_last_eight", "status", "is_fork_pull_request")
 		require.NoError(t, err)
+
+		task.Job.Run.IsForkPullRequest = isFork
+		err = actions_model.UpdateRun(t.Context(), task.Job.Run, "is_fork_pull_request")
+		require.NoError(t, err)
+
+		task.Job.IsForkPullRequest = isFork
+		_, err = actions_model.UpdateRunJob(t.Context(), task.Job, nil, "is_fork_pull_request")
+		require.NoError(t, err)
+
 		session := emptyTestSession(t)
 		context := APITestContext{
 			Session:  session,
@@ -80,11 +92,31 @@ func TestActionsJobTokenAccessLFS(t *testing.T) {
 	onGiteaRun(t, func(t *testing.T, u *url.URL) {
 		httpContext := NewAPITestContext(t, "user2", "repo-lfs-test", auth_model.AccessTokenScopeWriteUser, auth_model.AccessTokenScopeWriteRepository)
 		t.Run("Create Repository", doAPICreateRepository(httpContext, false, func(t *testing.T, repository structs.Repository) {
+			repo := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: repository.ID})
+			user := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: repo.OwnerID})
+
+			run := &actions_model.ActionRun{
+				Title:         "lfs job token test",
+				RepoID:        repo.ID,
+				OwnerID:       repo.OwnerID,
+				TriggerUserID: user.ID,
+			}
+			require.NoError(t, db.Insert(t.Context(), run))
+
+			job := &actions_model.ActionRunJob{
+				RunID:   run.ID,
+				RepoID:  repo.ID,
+				OwnerID: repo.OwnerID,
+			}
+			require.NoError(t, db.Insert(t.Context(), job))
+
 			task := &actions_model.ActionTask{}
 			require.NoError(t, task.GenerateToken())
 			task.Status = actions_model.StatusRunning
 			task.IsForkPullRequest = false
 			task.RepoID = repository.ID
+			task.OwnerID = repo.OwnerID
+			task.JobID = job.ID
 			err := db.Insert(t.Context(), task)
 			require.NoError(t, err)
 			session := emptyTestSession(t)

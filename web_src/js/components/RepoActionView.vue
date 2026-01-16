@@ -9,6 +9,7 @@ import {POST, DELETE} from '../modules/fetch.ts';
 import type {IntervalId} from '../types.ts';
 import {toggleFullScreen} from '../utils.ts';
 import WorkflowGraph from './WorkflowGraph.vue'
+import ActionJobTree from './ActionJobTree.vue';
 import {localUserSettings} from '../modules/user-settings.ts';
 import type {ActionsRunStatus, ActionsJob} from '../modules/gitea-actions.ts';
 
@@ -108,6 +109,7 @@ export default defineComponent({
     SvgIcon,
     ActionRunStatus,
     WorkflowGraph,
+    ActionJobTree,
   },
   props: {
     runId: {type: Number, required: true},
@@ -152,6 +154,8 @@ export default defineComponent({
         workflowID: '',
         workflowLink: '',
         isSchedule: false,
+        parentJobLink: '',
+        parentJobDisplay: '',
         jobs: [
           // {
           //   id: 0,
@@ -180,6 +184,8 @@ export default defineComponent({
       currentJob: {
         title: '',
         detail: '',
+        childRunLink: '',
+        childRunIndex: 0,
         steps: [
           // {
           //   summary: '',
@@ -532,23 +538,22 @@ export default defineComponent({
           <span v-if="run.commit.branch.isDeleted" class="gt-ellipsis tw-line-through" :data-tooltip-content="run.commit.branch.name">{{ run.commit.branch.name }}</span>
           <a v-else class="gt-ellipsis" :href="run.commit.branch.link" :data-tooltip-content="run.commit.branch.name">{{ run.commit.branch.name }}</a>
         </span>
+        <span v-if="run.parentJobLink && run.parentJobDisplay">
+          ({{ locale.parentJob }}
+          <a class="muted" :href="run.parentJobLink">{{ run.parentJobDisplay }}</a>
+          )
+        </span>
       </div>
     </div>
     <div class="action-view-body">
       <div class="action-view-left">
         <div class="job-group-section">
-          <div class="job-brief-list">
-            <a class="job-brief-item" :href="run.link+'/jobs/'+job.id" :class="jobId === job.id ? 'selected' : ''" v-for="job in run.jobs" :key="job.id">
-              <div class="job-brief-item-left">
-                <ActionRunStatus :locale-status="locale.status[job.status]" :status="job.status"/>
-                <span class="job-brief-name tw-mx-2 gt-ellipsis">{{ job.name }}</span>
-              </div>
-              <span class="job-brief-item-right">
-                <SvgIcon name="octicon-sync" role="button" :data-tooltip-content="locale.rerun" class="job-brief-rerun tw-mx-2 link-action interact-fg" :data-url="`${run.link}/jobs/${job.id}/rerun`" v-if="job.canRerun"/>
-                <span class="step-summary-duration">{{ job.duration }}</span>
-              </span>
-            </a>
-          </div>
+          <ActionJobTree
+            :jobs="run.jobs"
+            :selected-job-id="jobId"
+            :run-link="run.link"
+            :locale="locale"
+          />
         </div>
         <div class="job-artifacts" v-if="artifacts.length > 0">
           <div class="job-artifacts-title">
@@ -591,6 +596,10 @@ export default defineComponent({
           <div class="job-info-header-left gt-ellipsis">
             <h3 class="job-info-header-title gt-ellipsis">
               {{ currentJob.title }}
+              <span v-if="currentJob.childRunLink">
+                ({{ locale.reusableWorkflowChildRun }}
+                <a class="muted" :href="currentJob.childRunLink">#{{ currentJob.childRunIndex }}</a>)
+              </span>
             </h3>
             <p class="job-info-header-detail">
               {{ currentJob.detail }}
@@ -752,61 +761,6 @@ export default defineComponent({
 .job-artifacts-list {
   padding-left: 12px;
   list-style: none;
-}
-
-.job-brief-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.job-brief-item {
-  padding: 10px;
-  border-radius: var(--border-radius);
-  text-decoration: none;
-  display: flex;
-  flex-wrap: nowrap;
-  justify-content: space-between;
-  align-items: center;
-  color: var(--color-text);
-}
-
-.job-brief-item:hover {
-  background-color: var(--color-hover);
-}
-
-.job-brief-item.selected {
-  font-weight: var(--font-weight-bold);
-  background-color: var(--color-active);
-}
-
-.job-brief-item:first-of-type {
-  margin-top: 0;
-}
-
-.job-brief-item .job-brief-rerun {
-  cursor: pointer;
-}
-
-.job-brief-item .job-brief-item-left {
-  display: flex;
-  width: 100%;
-  min-width: 0;
-}
-
-.job-brief-item .job-brief-item-left span {
-  display: flex;
-  align-items: center;
-}
-
-.job-brief-item .job-brief-item-left .job-brief-name {
-  display: block;
-  width: 70%;
-}
-
-.job-brief-item .job-brief-item-right {
-  display: flex;
-  align-items: center;
 }
 
 /* ================ */

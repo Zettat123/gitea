@@ -50,8 +50,40 @@ func GetAllRerunJobs(job *actions_model.ActionRunJob, allJobs []*actions_model.A
 }
 
 // RerunWorkflowRunJobs reruns all done jobs of a workflow run,
-// or reruns a selected job and all of its downstream jobs when targetJob is specified.
-func RerunWorkflowRunJobs(ctx context.Context, repo *repo_model.Repository, run *actions_model.ActionRun, jobs []*actions_model.ActionRunJob, targetJob *actions_model.ActionRunJob) error {
+// or reruns a selected job and all of its downstream jobs when targetJobID is specified.
+func RerunWorkflowRunJobs(ctx context.Context, repo *repo_model.Repository, runID, targetJobID int64) error {
+	rootRun, err := actions_model.GetRunByRepoAndID(ctx, repo.ID, runID)
+	if err != nil {
+		return err
+	}
+	// Rerun is not allowed if the run is not done.
+	if !rootRun.Status.IsDone() {
+		return util.NewInvalidArgumentErrorf("this workflow run is not done")
+	}
+	if rootRun.ParentJobID > 0 {
+		return util.ErrorWrap(util.ErrNotExist, "run %d is not a root run", runID)
+	}
+
+	if targetJobID > 0 {
+		jobRootRunID, err := actions_model.GetRootRunIDByRepoAndJobID(ctx, repo.ID, targetJobID)
+		if err != nil {
+			return err
+		}
+		if jobRootRunID != rootRun.ID {
+			return util.NewNotExistErrorf("cannot find job %d of run %d", targetJobID, rootRun.ID)
+		}
+	}
+
+	plan, err := buildRerunPlan(ctx, repo, rootRun, targetJobID)
+	if err != nil {
+		return err
+	}
+
+	return executeRerunPlan(ctx, repo, plan)
+}
+
+// TODO: remove this function after rerun_plan is completed
+func OldRerunWorkflowRunJobs(ctx context.Context, repo *repo_model.Repository, run *actions_model.ActionRun, jobs []*actions_model.ActionRunJob, targetJob *actions_model.ActionRunJob) error {
 	// Rerun is not allowed if the run is not done.
 	if !run.Status.IsDone() {
 		return util.NewInvalidArgumentErrorf("this workflow run is not done")

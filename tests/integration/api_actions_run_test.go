@@ -254,6 +254,18 @@ func TestAPIActionsRerunWorkflowJob(t *testing.T) {
 	writeToken := getTokenForLoggedInUser(t, session, auth_model.AccessTokenScopeWriteRepository)
 	readToken := getTokenForLoggedInUser(t, session, auth_model.AccessTokenScopeReadRepository)
 
+	t.Run("ForbiddenWithoutWriteScope", func(t *testing.T) {
+		req := NewRequest(t, "POST", fmt.Sprintf("/api/v1/repos/%s/actions/runs/795/jobs/199/rerun", repo.FullName())).
+			AddTokenAuth(readToken)
+		MakeRequest(t, req, http.StatusForbidden)
+	})
+
+	t.Run("NotFoundJob", func(t *testing.T) {
+		req := NewRequest(t, "POST", fmt.Sprintf("/api/v1/repos/%s/actions/runs/795/jobs/999999/rerun", repo.FullName())).
+			AddTokenAuth(writeToken)
+		MakeRequest(t, req, http.StatusNotFound)
+	})
+
 	t.Run("Success", func(t *testing.T) {
 		req := NewRequest(t, "POST", fmt.Sprintf("/api/v1/repos/%s/actions/runs/795/jobs/199/rerun", repo.FullName())).
 			AddTokenAuth(writeToken)
@@ -278,17 +290,5 @@ func TestAPIActionsRerunWorkflowJob(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, actions_model.StatusWaiting, job199.Status)
 		assert.Equal(t, int64(0), job199.TaskID)
-	})
-
-	t.Run("ForbiddenWithoutWriteScope", func(t *testing.T) {
-		req := NewRequest(t, "POST", fmt.Sprintf("/api/v1/repos/%s/actions/runs/795/jobs/199/rerun", repo.FullName())).
-			AddTokenAuth(readToken)
-		MakeRequest(t, req, http.StatusForbidden)
-	})
-
-	t.Run("NotFoundJob", func(t *testing.T) {
-		req := NewRequest(t, "POST", fmt.Sprintf("/api/v1/repos/%s/actions/runs/795/jobs/999999/rerun", repo.FullName())).
-			AddTokenAuth(writeToken)
-		MakeRequest(t, req, http.StatusNotFound)
 	})
 }

@@ -93,6 +93,26 @@ func checkJobsByRunID(ctx context.Context, runID int64) error {
 	for _, job := range updatedJobs {
 		_ = job.LoadAttributes(ctx)
 		notify_service.WorkflowJobStatusUpdate(ctx, job.Run.Repo, job.Run.TriggerUser, job, nil)
+
+		if job.ChildRunID > 0 && job.Status.In(actions_model.StatusFailure, actions_model.StatusCancelled, actions_model.StatusSkipped) {
+			if err := finalizeChildRun(ctx, job.ChildRunID, job.Status); err != nil {
+				log.Error("finalize child run %d for parent job %d: %v", job.ChildRunID, job.ID, err)
+			}
+		}
+
+		if job.ChildRunID == -1 && job.Status == actions_model.StatusWaiting {
+			if err := expandReusableWorkflow(ctx, job); err != nil {
+				log.Error("expand reusable workflow child run for job %d: %v", job.ID, err)
+			}
+		}
+		if job.ChildRunID > 0 && job.Status == actions_model.StatusWaiting {
+			if err := refreshChildRunEventPayload(ctx, job); err != nil {
+				log.Error("refresh reusable workflow call payload for parent job %d child run %d: %v", job.ID, job.ChildRunID, err)
+			}
+			if err := EmitJobsIfReadyByRun(job.ChildRunID); err != nil {
+				log.Error("Check jobs of run %d: %v", job.ChildRunID, err)
+			}
+		}
 	}
 	runJobs := make(map[int64][]*actions_model.ActionRunJob)
 	for _, job := range jobs {
@@ -115,6 +135,18 @@ func checkJobsByRunID(ctx context.Context, runID int64) error {
 		}
 		if runUpdated {
 			NotifyWorkflowRunStatusUpdateWithReload(ctx, js[0])
+		}
+	}
+	if run.ParentJobID > 0 {
+		run, err = actions_model.GetRunByRepoAndID(ctx, run.RepoID, run.ID)
+		if err != nil {
+			return fmt.Errorf("GetRunByRepoAndID: %w", err)
+		}
+		if err := run.LoadParentJob(ctx); err != nil {
+			return fmt.Errorf("LoadParentJob: %w", err)
+		}
+		if err := EmitJobsIfReadyByRun(run.ParentJob.RunID); err != nil {
+			return fmt.Errorf("EmitJobsIfReadyByRun: %w", err)
 		}
 	}
 	return nil
@@ -201,6 +233,19 @@ func checkJobsOfRun(ctx context.Context, run *actions_model.ActionRun) (jobs, up
 	jobs, err = db.Find[actions_model.ActionRunJob](ctx, actions_model.FindRunJobOptions{RunID: run.ID})
 	if err != nil {
 		return nil, nil, err
+	}
+	if run.ParentJobID > 0 {
+		if err := run.LoadParentJob(ctx); err != nil {
+			return nil, nil, err
+		}
+		if run.ParentJob.Status.In(actions_model.StatusFailure, actions_model.StatusCancelled, actions_model.StatusSkipped) && !run.Status.IsDone() {
+			if err := finalizeChildRun(ctx, run.ID, run.ParentJob.Status); err != nil {
+				return nil, nil, err
+			}
+		}
+		if !run.ParentJob.Status.In(actions_model.StatusWaiting, actions_model.StatusRunning) {
+			return jobs, nil, nil
+		}
 	}
 	vars, err := actions_model.GetVariablesOfRun(ctx, run)
 	if err != nil {
