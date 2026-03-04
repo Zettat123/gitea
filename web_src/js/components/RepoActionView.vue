@@ -36,6 +36,8 @@ type Job = {
   canRerun: boolean;
   duration: string;
   link: string;
+  isChild: boolean;
+  isSelected: boolean;
 }
 
 type Step = {
@@ -507,18 +509,18 @@ export default defineComponent({
           <span v-if="run.commit.branch.isDeleted" class="gt-ellipsis tw-line-through" :data-tooltip-content="run.commit.branch.name">{{ run.commit.branch.name }}</span>
           <a v-else class="gt-ellipsis" :href="run.commit.branch.link" :data-tooltip-content="run.commit.branch.name">{{ run.commit.branch.name }}</a>
         </span>
-        <span v-if="run.parentJobLink && run.parentJobDisplay">
+        <!-- <span v-if="run.parentJobLink && run.parentJobDisplay">
           ({{ locale.parentJob }}
           <a class="muted" :href="run.parentJobLink">{{ run.parentJobDisplay }}</a>
           )
-        </span>
+        </span> -->
       </div>
     </div>
     <div class="action-view-body">
       <div class="action-view-left">
         <div class="job-group-section">
           <div class="job-brief-list">
-            <a class="job-brief-item" :href="job.link || run.link + '/jobs/' + index" :class="parseInt(jobIndex) === index ? 'selected' : ''" v-for="(job, index) in run.jobs" :key="job.id">
+            <a class="job-brief-item" :href="job.link || run.link + '/jobs/' + index" :class="(job.isChild ? ' job-brief-item-child' : '') + (job.isSelected ? ' selected' : '')" v-for="(job, index) in run.jobs" :key="job.id">
               <div class="job-brief-item-left">
                 <ActionRunStatus :locale-status="locale.status[job.status]" :status="job.status"/>
                 <span class="job-brief-name tw-mx-2 gt-ellipsis">{{ job.name }}</span>
@@ -781,6 +783,10 @@ export default defineComponent({
 .job-brief-item .job-brief-item-right {
   display: flex;
   align-items: center;
+}
+
+.job-brief-item-child {
+  margin-left: 20px;
 }
 
 /* ================ */

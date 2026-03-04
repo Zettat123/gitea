@@ -50,12 +50,12 @@ func getRunIndex(ctx *context_module.Context) int64 {
 func View(ctx *context_module.Context) {
 	ctx.Data["PageIsActions"] = true
 	runIndex := getRunIndex(ctx)
-	jobIndex := ctx.PathParamInt64("job")
+	jobID := ctx.PathParamInt64("job")
 	ctx.Data["RunIndex"] = runIndex
-	ctx.Data["JobIndex"] = jobIndex
+	ctx.Data["JobIndex"] = jobID
 	ctx.Data["ActionsURL"] = ctx.Repo.RepoLink + "/actions"
 
-	if getRunJobs(ctx, runIndex, jobIndex); ctx.Written() {
+	if _, _ = getRunJobs(ctx, runIndex, jobID); ctx.Written() {
 		return
 	}
 
@@ -144,12 +144,14 @@ type ViewResponse struct {
 }
 
 type ViewJob struct {
-	ID       int64  `json:"id"`
-	Name     string `json:"name"`
-	Status   string `json:"status"`
-	CanRerun bool   `json:"canRerun"`
-	Duration string `json:"duration"`
-	Link     string `json:"link"`
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	CanRerun   bool   `json:"canRerun"`
+	Duration   string `json:"duration"`
+	Link       string `json:"link"`
+	IsChild    bool   `json:"isChild"`
+	IsSelected bool   `json:"isSelected"` // Adicionado: isSelected
 }
 
 type ViewCommit struct {
@@ -211,13 +213,17 @@ func getActionsViewArtifacts(ctx context.Context, repoID, runIndex int64) (artif
 func ViewPost(ctx *context_module.Context) {
 	req := web.GetForm(ctx).(*ViewRequest)
 	runIndex := getRunIndex(ctx)
-	jobIndex := ctx.PathParamInt64("job")
+	jobID := ctx.PathParamInt64("job")
 
-	current, jobs := getRunJobs(ctx, runIndex, jobIndex)
+	current, jobs := getRunJobs(ctx, runIndex, jobID)
 	if ctx.Written() {
 		return
 	}
 	run := current.Run
+	if len(jobs) > 0 {
+		run = jobs[0].Run
+	}
+
 	if err := run.LoadAttributes(ctx); err != nil {
 		ctx.ServerError("run.LoadAttributes", err)
 		return
@@ -245,6 +251,9 @@ func ViewPost(ctx *context_module.Context) {
 	resp.State.Run.WorkflowID = run.WorkflowID
 	resp.State.Run.WorkflowLink = run.WorkflowLink()
 	resp.State.Run.IsSchedule = run.IsSchedule()
+
+	jobsSize := len(jobs)
+	var parentJobs actions_model.ActionJobList
 	if run.ParentJobID > 0 {
 		if err := run.LoadParentJob(ctx); err != nil {
 			ctx.ServerError("LoadParentJob", err)
@@ -254,35 +263,52 @@ func ViewPost(ctx *context_module.Context) {
 			ctx.ServerError("LoadAttributes", err)
 			return
 		}
-		parentJobs, err := actions_model.GetRunJobsByRunID(ctx, run.ParentJob.RunID)
+		parentJobs, err = actions_model.GetRunJobsByRunID(ctx, run.ParentJob.RunID)
 		if err != nil {
 			ctx.ServerError("GetRunJobsByRunID", err)
 			return
 		}
-		parentJobIndex := -1
-		for i, pj := range parentJobs {
-			if pj.ID == run.ParentJob.ID {
-				parentJobIndex = i
-				break
+		jobsSize += len(parentJobs)
+	}
+
+	resp.State.Run.Jobs = make([]*ViewJob, 0, jobsSize) // marshal to '[]' instead fo 'null' in json
+	resp.State.Run.Status = run.Status.String()
+	for _, v := range jobs {
+		jobLink := fmt.Sprintf("%s/jobs/%d", run.Link(), v.ID)
+
+		resp.State.Run.Jobs = append(resp.State.Run.Jobs, &ViewJob{
+			ID:         v.ID,
+			Name:       v.Name,
+			Status:     v.Status.String(),
+			CanRerun:   resp.State.Run.CanRerun,
+			Duration:   v.Duration().String(),
+			Link:       jobLink,
+			IsChild:    false,
+			IsSelected: jobID == v.ID,
+		})
+
+		// If this job triggers a Child Run (reusable workflow), load and append child jobs
+		if v.ChildRunID > 0 {
+			childJobs, err := actions_model.GetRunJobsByRunID(ctx, v.ChildRunID)
+			if err != nil {
+				log.Error("GetRunJobsByRunID for child run %d: %v", v.ChildRunID, err)
+			} else if len(childJobs) > 1 {
+				for _, cj := range childJobs {
+					childJobLink := fmt.Sprintf("%s/jobs/%d", run.Link(), cj.ID)
+
+					resp.State.Run.Jobs = append(resp.State.Run.Jobs, &ViewJob{
+						ID:         cj.ID,
+						Name:       cj.Name,
+						Status:     cj.Status.String(),
+						CanRerun:   resp.State.Run.CanRerun,
+						Duration:   cj.Duration().String(),
+						Link:       childJobLink,
+						IsChild:    true,
+						IsSelected: jobID == cj.ID,
+					})
+				}
 			}
 		}
-		if parentJobIndex >= 0 {
-			resp.State.Run.ParentJobLink = fmt.Sprintf("%s/jobs/%d", run.ParentJob.Run.Link(), parentJobIndex)
-			resp.State.Run.ParentJobDisplay = fmt.Sprintf("#%d / %s", run.ParentJob.Run.Index, run.ParentJob.Name)
-		}
-	}
-	resp.State.Run.Jobs = make([]*ViewJob, 0, len(jobs)) // marshal to '[]' instead fo 'null' in json
-	resp.State.Run.Status = run.Status.String()
-	for i, v := range jobs {
-		jobLink := fmt.Sprintf("%s/jobs/%d", run.Link(), i)
-		resp.State.Run.Jobs = append(resp.State.Run.Jobs, &ViewJob{
-			ID:       v.ID,
-			Name:     v.Name,
-			Status:   v.Status.String(),
-			CanRerun: resp.State.Run.CanRerun,
-			Duration: v.Duration().String(),
-			Link:     jobLink,
-		})
 	}
 
 	pusher := ViewUser{
@@ -310,6 +336,12 @@ func ViewPost(ctx *context_module.Context) {
 		Branch:   branch,
 	}
 
+	if current.ChildRunID > 0 {
+		if err := current.LoadChildRun(ctx); err != nil {
+			log.Error("LoadChildRun: %v", err)
+		}
+	}
+
 	var task *actions_model.ActionTask
 	if current.TaskID > 0 {
 		var err error
@@ -330,14 +362,6 @@ func ViewPost(ctx *context_module.Context) {
 	if run.NeedApproval {
 		resp.State.CurrentJob.Detail = ctx.Locale.TrString("actions.need_approval_desc")
 	}
-	if current.ChildRunID > 0 {
-		if err := current.LoadChildRun(ctx); err != nil {
-			log.Error("LoadChildRun: %v", err)
-		} else {
-			resp.State.CurrentJob.ChildRunLink = current.ChildRun.Link()
-			resp.State.CurrentJob.ChildRunIndex = current.ChildRun.Index
-		}
-	}
 	resp.State.CurrentJob.Steps = make([]*ViewJobStep, 0) // marshal to '[]' instead fo 'null' in json
 	resp.Logs.StepsLog = make([]*ViewStepLog, 0)          // marshal to '[]' instead fo 'null' in json
 	if task != nil {
@@ -348,6 +372,38 @@ func ViewPost(ctx *context_module.Context) {
 		}
 		resp.State.CurrentJob.Steps = append(resp.State.CurrentJob.Steps, steps...)
 		resp.Logs.StepsLog = append(resp.Logs.StepsLog, logs...)
+	} else if current.ChildRunID > 0 {
+		childJobs, err := actions_model.GetRunJobsByRunID(ctx, current.ChildRunID)
+		if err != nil {
+			ctx.ServerError("GetRunJobsByRunID", err)
+			return
+		}
+
+		if len(childJobs) > 0 {
+			childJob := childJobs[0]
+
+			if childJob.TaskID > 0 {
+				childTask, err := actions_model.GetTaskByID(ctx, childJob.TaskID)
+				if err != nil {
+					ctx.ServerError("GetTaskByID", err)
+					return
+				}
+
+				childTask.Job = childJob
+				if err := childTask.LoadAttributes(ctx); err != nil {
+					ctx.ServerError("childTask.LoadAttributes", err)
+					return
+				}
+
+				steps, logs, err := convertToViewModel(ctx, req.LogCursors, childTask)
+				if err != nil {
+					ctx.ServerError("convertToViewModel", err)
+					return
+				}
+				resp.State.CurrentJob.Steps = append(resp.State.CurrentJob.Steps, steps...)
+				resp.Logs.StepsLog = append(resp.Logs.StepsLog, logs...)
+			}
+		}
 	}
 
 	ctx.JSON(http.StatusOK, resp)
@@ -436,14 +492,10 @@ func convertToViewModel(ctx *context_module.Context, cursors []LogCursor, task *
 }
 
 // Rerun will rerun jobs in the given run
-// If jobIndexStr is a blank string, it means rerun all jobs
+// If jobID is 0, it means rerun all jobs
 func Rerun(ctx *context_module.Context) {
 	runIndex := getRunIndex(ctx)
-	jobIndexStr := ctx.PathParam("job")
-	var jobIndex int64
-	if jobIndexStr != "" {
-		jobIndex, _ = strconv.ParseInt(jobIndexStr, 10, 64)
-	}
+	jobID := ctx.PathParamInt64("job")
 
 	run, err := actions_model.GetRunByIndex(ctx, ctx.Repo.Repository.ID, runIndex)
 	if err != nil {
@@ -465,12 +517,12 @@ func Rerun(ctx *context_module.Context) {
 		return
 	}
 
-	job, jobs := getRunJobs(ctx, runIndex, jobIndex)
+	job, jobs := getRunJobs(ctx, runIndex, jobID)
 	if ctx.Written() {
 		return
 	}
 
-	if jobIndexStr == "" {
+	if jobID == 0 {
 		err = actions_service.Rerun(ctx, run, jobs, nil)
 	} else {
 		err = actions_service.Rerun(ctx, run, jobs, job)
@@ -484,18 +536,20 @@ func Rerun(ctx *context_module.Context) {
 
 func Logs(ctx *context_module.Context) {
 	runIndex := getRunIndex(ctx)
-	jobIndex := ctx.PathParamInt64("job")
+	jobID := ctx.PathParamInt64("job")
 
-	run, err := actions_model.GetRunByIndex(ctx, ctx.Repo.Repository.ID, runIndex)
-	if err != nil {
-		ctx.NotFoundOrServerError("GetRunByIndex", func(err error) bool {
-			return errors.Is(err, util.ErrNotExist)
-		}, err)
+	job, _ := getRunJobs(ctx, runIndex, jobID)
+	if ctx.Written() {
 		return
 	}
 
-	if err = common.DownloadActionsRunJobLogsWithIndex(ctx.Base, ctx.Repo.Repository, run.ID, jobIndex); err != nil {
-		ctx.NotFoundOrServerError("DownloadActionsRunJobLogsWithIndex", func(err error) bool {
+	if job == nil {
+		ctx.NotFound(nil)
+		return
+	}
+
+	if err := common.DownloadActionsRunJobLogs(ctx.Base, ctx.Repo.Repository, job); err != nil {
+		ctx.NotFoundOrServerError("DownloadActionsRunJobLogs", func(err error) bool {
 			return errors.Is(err, util.ErrNotExist)
 		}, err)
 	}
@@ -639,10 +693,10 @@ func Delete(ctx *context_module.Context) {
 	ctx.JSONOK()
 }
 
-// getRunJobs gets the jobs of runIndex, and returns jobs[jobIndex], jobs.
+// getRunJobs gets the jobs of runIndex, and returns the specific job (by ID) and the list of parent jobs.
 // Any error will be written to the ctx.
-// It never returns a nil job of an empty jobs, if the jobIndex is out of range, it will be treated as 0.
-func getRunJobs(ctx *context_module.Context, runIndex, jobIndex int64) (*actions_model.ActionRunJob, []*actions_model.ActionRunJob) {
+// If jobID is 0, it returns the first job.
+func getRunJobs(ctx *context_module.Context, runIndex, jobID int64) (*actions_model.ActionRunJob, []*actions_model.ActionRunJob) {
 	run, err := actions_model.GetRunByIndex(ctx, ctx.Repo.Repository.ID, runIndex)
 	if err != nil {
 		if errors.Is(err, util.ErrNotExist) {
@@ -653,24 +707,63 @@ func getRunJobs(ctx *context_module.Context, runIndex, jobIndex int64) (*actions
 		return nil, nil
 	}
 	run.Repo = ctx.Repo.Repository
+
 	jobs, err := actions_model.GetRunJobsByRunID(ctx, run.ID)
 	if err != nil {
 		ctx.ServerError("GetRunJobsByRunID", err)
 		return nil, nil
 	}
-	if len(jobs) == 0 {
-		ctx.NotFound(nil)
-		return nil, nil
-	}
-
 	for _, v := range jobs {
 		v.Run = run
+		v.Repo = run.Repo
 	}
 
-	if jobIndex >= 0 && jobIndex < int64(len(jobs)) {
-		return jobs[jobIndex], jobs
+	var job *actions_model.ActionRunJob
+
+	// If no ID provided (or 0), use the first job (default view)
+	if jobID == 0 && len(jobs) > 0 {
+		job = jobs[0]
+	} else {
+		// Search for the job by ID
+		for _, v := range jobs {
+			if v.ID == jobID {
+				job = v
+				break
+			}
+			// Search in child jobs (Workflow Call)
+			if v.ChildRunID > 0 {
+				childJobs, err := actions_model.GetRunJobsByRunID(ctx, v.ChildRunID)
+				if err != nil {
+					ctx.ServerError("GetRunJobsByRunID", err)
+					return nil, nil
+				}
+				for _, c := range childJobs {
+					if c.ID == jobID {
+						job = c
+						// We need to load the child run details so the job has the correct context (Steps, etc)
+						childRun, err := actions_model.GetRunByRepoAndID(ctx, run.RepoID, v.ChildRunID)
+						if err != nil {
+							ctx.ServerError("GetRunByRepoAndID", err)
+							return nil, nil
+						}
+						job.Run = childRun
+						job.Run.Repo = run.Repo
+						job.Repo = run.Repo
+						break
+					}
+				}
+			}
+			if job != nil {
+				break
+			}
+		}
 	}
-	return jobs[0], jobs
+
+	if job == nil && len(jobs) > 0 {
+		job = jobs[0]
+	}
+
+	return job, jobs
 }
 
 func ArtifactsDeleteView(ctx *context_module.Context) {
