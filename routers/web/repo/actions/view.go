@@ -38,11 +38,11 @@ import (
 	"github.com/nektos/act/pkg/model"
 )
 
-func getRunIndex(ctx *context_module.Context) int64 {
-	// if run param is "latest", get the latest run index
+func getRunID(ctx *context_module.Context) int64 {
+	// if run param is "latest", get the latest run id
 	if ctx.PathParam("run") == "latest" {
 		if run, _ := actions_model.GetLatestRun(ctx, ctx.Repo.Repository.ID); run != nil {
-			return run.Index
+			return run.ID
 		}
 	}
 	return ctx.PathParamInt64("run")
@@ -50,24 +50,27 @@ func getRunIndex(ctx *context_module.Context) int64 {
 
 func View(ctx *context_module.Context) {
 	ctx.Data["PageIsActions"] = true
-	runIndex := getRunIndex(ctx)
-	jobIndex := ctx.PathParamInt("job")
-	ctx.Data["RunIndex"] = runIndex
-	ctx.Data["JobIndex"] = jobIndex
-	ctx.Data["ActionsURL"] = ctx.Repo.RepoLink + "/actions"
+	runID := getRunID(ctx)
+	jobIDHas := ctx.PathParam("job") != ""
+	jobID := ctx.PathParamInt64("job")
 
-	if getRunJobs(ctx, runIndex, jobIndex); ctx.Written() {
+	current, _ := getRunJobsByID(ctx, runID, jobID, jobIDHas)
+	if ctx.Written() {
 		return
 	}
+
+	ctx.Data["RunID"] = runID
+	ctx.Data["JobID"] = current.ID
+	ctx.Data["ActionsURL"] = ctx.Repo.RepoLink + "/actions"
 
 	ctx.HTML(http.StatusOK, tplViewActions)
 }
 
 func ViewWorkflowFile(ctx *context_module.Context) {
-	runIndex := getRunIndex(ctx)
-	run, err := actions_model.GetRunByIndex(ctx, ctx.Repo.Repository.ID, runIndex)
+	runID := getRunID(ctx)
+	run, err := actions_model.GetRunByRepoAndID(ctx, ctx.Repo.Repository.ID, runID)
 	if err != nil {
-		ctx.NotFoundOrServerError("GetRunByIndex", func(err error) bool {
+		ctx.NotFoundOrServerError("GetRunByRepoAndID", func(err error) bool {
 			return errors.Is(err, util.ErrNotExist)
 		}, err)
 		return
@@ -187,8 +190,8 @@ type ViewStepLogLine struct {
 	Timestamp float64 `json:"timestamp"`
 }
 
-func getActionsViewArtifacts(ctx context.Context, repoID, runIndex int64) (artifactsViewItems []*ArtifactsViewItem, err error) {
-	run, err := actions_model.GetRunByIndex(ctx, repoID, runIndex)
+func getActionsViewArtifacts(ctx context.Context, repoID, runID int64) (artifactsViewItems []*ArtifactsViewItem, err error) {
+	run, err := actions_model.GetRunByRepoAndID(ctx, repoID, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -208,10 +211,11 @@ func getActionsViewArtifacts(ctx context.Context, repoID, runIndex int64) (artif
 
 func ViewPost(ctx *context_module.Context) {
 	req := web.GetForm(ctx).(*ViewRequest)
-	runIndex := getRunIndex(ctx)
-	jobIndex := ctx.PathParamInt("job")
+	runID := getRunID(ctx)
+	jobIDHas := ctx.PathParam("job") != ""
+	jobID := ctx.PathParamInt64("job")
 
-	current, jobs := getRunJobs(ctx, runIndex, jobIndex)
+	current, jobs := getRunJobsByID(ctx, runID, jobID, jobIDHas)
 	if ctx.Written() {
 		return
 	}
@@ -223,7 +227,7 @@ func ViewPost(ctx *context_module.Context) {
 
 	var err error
 	resp := &ViewResponse{}
-	resp.Artifacts, err = getActionsViewArtifacts(ctx, ctx.Repo.Repository.ID, runIndex)
+	resp.Artifacts, err = getActionsViewArtifacts(ctx, ctx.Repo.Repository.ID, runID)
 	if err != nil {
 		if !errors.Is(err, util.ErrNotExist) {
 			ctx.ServerError("getActionsViewArtifacts", err)
@@ -400,16 +404,19 @@ func convertToViewModel(ctx context.Context, locale translation.Locale, cursors 
 }
 
 // Rerun will rerun jobs in the given run
-// If jobIndexStr is a blank string, it means rerun all jobs
+// If jobIDStr is a blank string, it means rerun all jobs
 func Rerun(ctx *context_module.Context) {
-	runIndex := getRunIndex(ctx)
-	jobIndexHas := ctx.PathParam("job") != ""
-	jobIndex := ctx.PathParamInt("job")
+	runID := getRunID(ctx)
+	jobIDHas := ctx.PathParam("job") != ""
+	jobID := ctx.PathParamInt64("job")
 
-	run, err := actions_model.GetRunByIndex(ctx, ctx.Repo.Repository.ID, runIndex)
+	run, err := actions_model.GetRunByRepoAndID(ctx, ctx.Repo.Repository.ID, runID)
 	if err != nil {
-		ctx.ServerError("GetRunByIndex", err)
-		return
+		if errors.Is(err, util.ErrNotExist) {
+			ctx.HTTPError(http.StatusNotFound, err.Error())
+			return
+		}
+		ctx.ServerError("GetRunByRepoAndID", err)
 	}
 
 	// rerun is not allowed if the run is not done
@@ -433,12 +440,17 @@ func Rerun(ctx *context_module.Context) {
 	}
 
 	var targetJob *actions_model.ActionRunJob // nil means rerun all jobs
-	if jobIndexHas {
-		if jobIndex < 0 || jobIndex >= len(jobs) {
+	if jobIDHas {
+		for _, job := range jobs {
+			if job.ID == jobID {
+				targetJob = job
+				break
+			}
+		}
+		if targetJob == nil {
 			ctx.JSONError(ctx.Locale.Tr("error.not_found"))
 			return
 		}
-		targetJob = jobs[jobIndex] // only rerun the selected job
 	}
 
 	if err := actions_service.RerunWorkflowRunJobs(ctx, ctx.Repo.Repository, run, jobs, targetJob); err != nil {
@@ -450,28 +462,28 @@ func Rerun(ctx *context_module.Context) {
 }
 
 func Logs(ctx *context_module.Context) {
-	runIndex := getRunIndex(ctx)
-	jobIndex := ctx.PathParamInt64("job")
+	runID := getRunID(ctx)
+	jobID := ctx.PathParamInt64("job")
 
-	run, err := actions_model.GetRunByIndex(ctx, ctx.Repo.Repository.ID, runIndex)
+	run, err := actions_model.GetRunByRepoAndID(ctx, ctx.Repo.Repository.ID, runID)
 	if err != nil {
-		ctx.NotFoundOrServerError("GetRunByIndex", func(err error) bool {
+		ctx.NotFoundOrServerError("GetRunByRepoAndID", func(err error) bool {
 			return errors.Is(err, util.ErrNotExist)
 		}, err)
 		return
 	}
 
-	if err = common.DownloadActionsRunJobLogsWithIndex(ctx.Base, ctx.Repo.Repository, run.ID, jobIndex); err != nil {
-		ctx.NotFoundOrServerError("DownloadActionsRunJobLogsWithIndex", func(err error) bool {
+	if err = common.DownloadActionsRunJobLogsWithID(ctx.Base, ctx.Repo.Repository, run.ID, jobID); err != nil {
+		ctx.NotFoundOrServerError("DownloadActionsRunJobLogsWithID", func(err error) bool {
 			return errors.Is(err, util.ErrNotExist)
 		}, err)
 	}
 }
 
 func Cancel(ctx *context_module.Context) {
-	runIndex := getRunIndex(ctx)
+	runID := getRunID(ctx)
 
-	firstJob, jobs := getRunJobs(ctx, runIndex, -1)
+	firstJob, jobs := getRunJobsByID(ctx, runID, 0, false)
 	if ctx.Written() {
 		return
 	}
@@ -505,9 +517,9 @@ func Cancel(ctx *context_module.Context) {
 }
 
 func Approve(ctx *context_module.Context) {
-	runIndex := getRunIndex(ctx)
+	runID := getRunID(ctx)
 
-	approveRuns(ctx, []int64{runIndex})
+	approveRuns(ctx, []int64{runID})
 	if ctx.Written() {
 		return
 	}
@@ -515,17 +527,17 @@ func Approve(ctx *context_module.Context) {
 	ctx.JSONOK()
 }
 
-func approveRuns(ctx *context_module.Context, runIndexes []int64) {
+func approveRuns(ctx *context_module.Context, runIDs []int64) {
 	doer := ctx.Doer
 	repo := ctx.Repo.Repository
 
 	updatedJobs := make([]*actions_model.ActionRunJob, 0)
-	runMap := make(map[int64]*actions_model.ActionRun, len(runIndexes))
-	runJobs := make(map[int64][]*actions_model.ActionRunJob, len(runIndexes))
+	runMap := make(map[int64]*actions_model.ActionRun, len(runIDs))
+	runJobs := make(map[int64][]*actions_model.ActionRunJob, len(runIDs))
 
 	err := db.WithTx(ctx, func(ctx context.Context) (err error) {
-		for _, runIndex := range runIndexes {
-			run, err := actions_model.GetRunByIndex(ctx, repo.ID, runIndex)
+		for _, runID := range runIDs {
+			run, err := actions_model.GetRunByRepoAndID(ctx, repo.ID, runID)
 			if err != nil {
 				return err
 			}
@@ -580,16 +592,16 @@ func approveRuns(ctx *context_module.Context, runIndexes []int64) {
 }
 
 func Delete(ctx *context_module.Context) {
-	runIndex := getRunIndex(ctx)
+	runID := getRunID(ctx)
 	repoID := ctx.Repo.Repository.ID
 
-	run, err := actions_model.GetRunByIndex(ctx, repoID, runIndex)
+	run, err := actions_model.GetRunByRepoAndID(ctx, repoID, runID)
 	if err != nil {
 		if errors.Is(err, util.ErrNotExist) {
 			ctx.JSONErrorNotFound()
 			return
 		}
-		ctx.ServerError("GetRunByIndex", err)
+		ctx.ServerError("GetRunByRepoAndID", err)
 		return
 	}
 
@@ -606,17 +618,17 @@ func Delete(ctx *context_module.Context) {
 	ctx.JSONOK()
 }
 
-// getRunJobs gets the jobs of runIndex, and returns jobs[jobIndex], jobs.
+// getRunJobsByID gets the jobs of runID, and returns the selected job and all jobs.
 // Any error will be written to the ctx.
-// It never returns a nil job of an empty jobs, if the jobIndex is out of range, it will be treated as 0.
-func getRunJobs(ctx *context_module.Context, runIndex int64, jobIndex int) (*actions_model.ActionRunJob, []*actions_model.ActionRunJob) {
-	run, err := actions_model.GetRunByIndex(ctx, ctx.Repo.Repository.ID, runIndex)
+// If the jobID is not found when jobIDHas is true, it returns 404.
+func getRunJobsByID(ctx *context_module.Context, runID, jobID int64, jobIDHas bool) (*actions_model.ActionRunJob, []*actions_model.ActionRunJob) {
+	run, err := actions_model.GetRunByRepoAndID(ctx, ctx.Repo.Repository.ID, runID)
 	if err != nil {
 		if errors.Is(err, util.ErrNotExist) {
 			ctx.NotFound(nil)
 			return nil, nil
 		}
-		ctx.ServerError("GetRunByIndex", err)
+		ctx.ServerError("GetRunByRepoAndID", err)
 		return nil, nil
 	}
 	run.Repo = ctx.Repo.Repository
@@ -634,19 +646,25 @@ func getRunJobs(ctx *context_module.Context, runIndex int64, jobIndex int) (*act
 		v.Run = run
 	}
 
-	if jobIndex >= 0 && jobIndex < len(jobs) {
-		return jobs[jobIndex], jobs
+	if jobIDHas {
+		for _, v := range jobs {
+			if v.ID == jobID {
+				return v, jobs
+			}
+		}
+		ctx.NotFound(nil)
+		return nil, nil
 	}
 	return jobs[0], jobs
 }
 
 func ArtifactsDeleteView(ctx *context_module.Context) {
-	runIndex := getRunIndex(ctx)
+	runID := getRunID(ctx)
 	artifactName := ctx.PathParam("artifact_name")
 
-	run, err := actions_model.GetRunByIndex(ctx, ctx.Repo.Repository.ID, runIndex)
+	run, err := actions_model.GetRunByRepoAndID(ctx, ctx.Repo.Repository.ID, runID)
 	if err != nil {
-		ctx.NotFoundOrServerError("GetRunByIndex", func(err error) bool {
+		ctx.NotFoundOrServerError("GetRunByRepoAndID", func(err error) bool {
 			return errors.Is(err, util.ErrNotExist)
 		}, err)
 		return
@@ -659,16 +677,16 @@ func ArtifactsDeleteView(ctx *context_module.Context) {
 }
 
 func ArtifactsDownloadView(ctx *context_module.Context) {
-	runIndex := getRunIndex(ctx)
+	runID := getRunID(ctx)
 	artifactName := ctx.PathParam("artifact_name")
 
-	run, err := actions_model.GetRunByIndex(ctx, ctx.Repo.Repository.ID, runIndex)
+	run, err := actions_model.GetRunByRepoAndID(ctx, ctx.Repo.Repository.ID, runID)
 	if err != nil {
 		if errors.Is(err, util.ErrNotExist) {
 			ctx.HTTPError(http.StatusNotFound, err.Error())
 			return
 		}
-		ctx.ServerError("GetRunByIndex", err)
+		ctx.ServerError("GetRunByRepoAndID", err)
 		return
 	}
 
@@ -754,19 +772,19 @@ func ApproveAllChecks(ctx *context_module.Context) {
 		return
 	}
 
-	runIndexes := make([]int64, 0, len(runs))
+	runIDs := make([]int64, 0, len(runs))
 	for _, run := range runs {
 		if run.NeedApproval {
-			runIndexes = append(runIndexes, run.Index)
+			runIDs = append(runIDs, run.ID)
 		}
 	}
 
-	if len(runIndexes) == 0 {
+	if len(runIDs) == 0 {
 		ctx.JSONOK()
 		return
 	}
 
-	approveRuns(ctx, runIndexes)
+	approveRuns(ctx, runIDs)
 	if ctx.Written() {
 		return
 	}

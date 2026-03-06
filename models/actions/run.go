@@ -70,14 +70,14 @@ func (run *ActionRun) HTMLURL() string {
 	if run.Repo == nil {
 		return ""
 	}
-	return fmt.Sprintf("%s/actions/runs/%d", run.Repo.HTMLURL(), run.Index)
+	return fmt.Sprintf("%s/actions/runs/%d", run.Repo.HTMLURL(), run.ID)
 }
 
 func (run *ActionRun) Link() string {
 	if run.Repo == nil {
 		return ""
 	}
-	return fmt.Sprintf("%s/actions/runs/%d", run.Repo.Link(), run.Index)
+	return fmt.Sprintf("%s/actions/runs/%d", run.Repo.Link(), run.ID)
 }
 
 func (run *ActionRun) WorkflowLink() string {
