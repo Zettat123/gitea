@@ -93,7 +93,7 @@ jobs:
 		req = NewRequest(t, "POST", fmt.Sprintf("/%s/%s/actions/runs/%d/jobs/%d/rerun", user2.Name, repo1.Name, run2.ID, job2.ID))
 		user2Session.MakeRequest(t, req, http.StatusNotFound)
 		req = NewRequest(t, "POST", fmt.Sprintf("/%s/%s/actions/runs/%d/jobs/%d/rerun", user2.Name, repo1.Name, run1.ID, job2.ID))
-		user2Session.MakeRequest(t, req, http.StatusBadRequest)
+		user2Session.MakeRequest(t, req, http.StatusNotFound)
 		req = NewRequest(t, "POST", fmt.Sprintf("/%s/%s/actions/runs/%d/jobs/%d/rerun", user2.Name, repo1.Name, run2.ID, job1.ID))
 		user2Session.MakeRequest(t, req, http.StatusNotFound)
 	})
