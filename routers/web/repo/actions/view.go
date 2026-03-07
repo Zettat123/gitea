@@ -592,9 +592,8 @@ func Delete(ctx *context_module.Context) {
 	ctx.JSONOK()
 }
 
-// getRunJobsByID gets the jobs of runID, and returns the selected job and all jobs.
-// Any error will be written to the ctx.
-// If the jobID is not found when jobIDHas is true, it returns 404.
+// getRunJobsAndCurrentJob loads the run and its jobs for runID, and returns the selected job based on the optional "job" path param (or the first job by default).
+// Any error will be written to the ctx, and nils are returned in that case.
 func getRunJobsAndCurrentJob(ctx *context_module.Context, runID int64) (*actions_model.ActionRun, []*actions_model.ActionRunJob, *actions_model.ActionRunJob) {
 	run, err := actions_model.GetRunByRepoAndID(ctx, ctx.Repo.Repository.ID, runID)
 	if err != nil {
