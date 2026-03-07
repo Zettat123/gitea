@@ -43,7 +43,7 @@ func DownloadActionsRunJobLogs(ctx *context.APIContext) {
 	//     "$ref": "#/responses/notFound"
 
 	jobID := ctx.PathParamInt64("job_id")
-	curJob, err := actions_model.GetRunJobByID(ctx, jobID)
+	curJob, err := actions_model.GetRunJobByRepoAndID(ctx, ctx.Repo.Repository.ID, jobID)
 	if err != nil {
 		ctx.APIErrorInternal(err)
 		return

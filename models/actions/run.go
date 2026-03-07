@@ -299,7 +299,7 @@ func CancelJobs(ctx context.Context, jobs []*ActionRunJob) ([]*ActionRunJob, err
 		if err := StopTask(ctx, job.TaskID, StatusCancelled); err != nil {
 			return cancelledJobs, err
 		}
-		updatedJob, err := GetRunJobByID(ctx, job.ID)
+		updatedJob, err := GetRunJobByRunAndID(ctx, job.RunID, job.ID)
 		if err != nil {
 			return cancelledJobs, fmt.Errorf("get job: %w", err)
 		}

@@ -18,16 +18,16 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestActionsView(t *testing.T) {
+func TestActionsRoute(t *testing.T) {
 	onGiteaRun(t, func(t *testing.T, u *url.URL) {
 		user2 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2})
 		user2Session := loginUser(t, user2.Name)
 		user2Token := getTokenForLoggedInUser(t, user2Session, auth_model.AccessTokenScopeWriteRepository, auth_model.AccessTokenScopeWriteUser)
 
-		repo1 := createActionsTestRepo(t, user2Token, "actions-view-1", false)
+		repo1 := createActionsTestRepo(t, user2Token, "actions-route-test-1", false)
 		runner1 := newMockRunner()
 		runner1.registerAsRepoRunner(t, user2.Name, repo1.Name, "mock-runner", []string{"ubuntu-latest"}, false)
-		repo2 := createActionsTestRepo(t, user2Token, "actions-view-2", false)
+		repo2 := createActionsTestRepo(t, user2Token, "actions-route-test-2", false)
 		runner2 := newMockRunner()
 		runner2.registerAsRepoRunner(t, user2.Name, repo2.Name, "mock-runner", []string{"ubuntu-latest"}, false)
 

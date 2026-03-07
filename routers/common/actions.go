@@ -15,12 +15,9 @@ import (
 )
 
 func DownloadActionsRunJobLogsWithID(ctx *context.Base, ctxRepo *repo_model.Repository, runID, jobID int64) error {
-	job, err := actions_model.GetRunJobByID(ctx, jobID)
+	job, err := actions_model.GetRunJobByRunAndID(ctx, runID, jobID)
 	if err != nil {
 		return err
-	}
-	if job.RunID != runID {
-		return util.NewNotExistErrorf("job not found")
 	}
 	if err := job.LoadRepo(ctx); err != nil {
 		return fmt.Errorf("LoadRepo: %w", err)
