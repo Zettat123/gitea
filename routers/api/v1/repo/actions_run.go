@@ -45,7 +45,11 @@ func DownloadActionsRunJobLogs(ctx *context.APIContext) {
 	jobID := ctx.PathParamInt64("job_id")
 	curJob, err := actions_model.GetRunJobByRepoAndID(ctx, ctx.Repo.Repository.ID, jobID)
 	if err != nil {
-		ctx.APIErrorInternal(err)
+		if errors.Is(err, util.ErrNotExist) {
+			ctx.APIErrorNotFound(err)
+		} else {
+			ctx.APIErrorInternal(err)
+		}
 		return
 	}
 	if err = curJob.LoadRepo(ctx); err != nil {
