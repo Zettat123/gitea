@@ -6,7 +6,10 @@ package v1_26
 import (
 	"testing"
 
+	_ "code.gitea.io/gitea/models/actions"
+	_ "code.gitea.io/gitea/models/git"
 	"code.gitea.io/gitea/models/migrations/base"
+	_ "code.gitea.io/gitea/models/repo"
 	"code.gitea.io/gitea/modules/setting"
 	"code.gitea.io/gitea/modules/test"
 
@@ -57,44 +60,13 @@ func Test_FixCommitStatusTargetURLToUseRunAndJobID(t *testing.T) {
 	)
 	defer deferable()
 
-	repo := &Repository{ID: 1, OwnerName: "testuser", Name: "repo1"}
-	_, err := x.Insert(repo)
-	require.NoError(t, err)
-
-	run := &ActionRun{ID: 106, RepoID: repo.ID, Index: 7}
-	_, err = x.Insert(run)
-	require.NoError(t, err)
-
-	job0 := &ActionRunJob{ID: 530, RunID: run.ID}
-	job1 := &ActionRunJob{ID: 531, RunID: run.ID}
-	_, err = x.Insert(job0, job1)
-	require.NoError(t, err)
-
-	oldURL1 := "/testuser/repo1/actions/runs/7/jobs/0"
 	newURL1 := "/testuser/repo1/actions/runs/106/jobs/530"
-	oldURL2 := "/testuser/repo1/actions/runs/7/jobs/1"
 	newURL2 := "/testuser/repo1/actions/runs/106/jobs/531"
 
 	invalidWrongRepo := "/otheruser/badrepo/actions/runs/7/jobs/0"
 	invalidNonexistentRun := "/testuser/repo1/actions/runs/10/jobs/0"
 	invalidNonexistentJob := "/testuser/repo1/actions/runs/7/jobs/3"
 	externalTargetURL := "https://ci.example.com/build/123"
-
-	_, err = x.Insert(
-		&CommitStatus{ID: 10, RepoID: repo.ID, TargetURL: oldURL1},
-		&CommitStatus{ID: 11, RepoID: repo.ID, TargetURL: oldURL2},
-		&CommitStatus{ID: 12, RepoID: repo.ID, TargetURL: invalidWrongRepo},
-		&CommitStatus{ID: 13, RepoID: repo.ID, TargetURL: invalidNonexistentRun},
-		&CommitStatus{ID: 14, RepoID: repo.ID, TargetURL: invalidNonexistentJob},
-		&CommitStatus{ID: 15, RepoID: repo.ID, TargetURL: externalTargetURL},
-	)
-	require.NoError(t, err)
-
-	_, err = x.Insert(
-		&CommitStatusSummary{ID: 20, RepoID: repo.ID, SHA: "012345", State: "success", TargetURL: oldURL1},
-		&CommitStatusSummary{ID: 21, RepoID: repo.ID, SHA: "678901", State: "success", TargetURL: externalTargetURL},
-	)
-	require.NoError(t, err)
 
 	require.NoError(t, FixCommitStatusTargetURLToUseRunAndJobID(x))
 
@@ -126,6 +98,6 @@ func assertTargetURL(t *testing.T, x *xorm.Engine, table string, id int64, want 
 	}
 	has, err := x.Table(table).Where("id=?", id).Cols("target_url").Get(&row)
 	require.NoError(t, err)
-	require.True(t, has)
+	require.Truef(t, has, "row not found: table=%s id=%d", table, id)
 	require.Equal(t, want, row.TargetURL)
 }
