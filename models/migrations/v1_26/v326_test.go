@@ -10,6 +10,10 @@ import (
 	"code.gitea.io/gitea/modules/setting"
 	"code.gitea.io/gitea/modules/test"
 
+	_ "code.gitea.io/gitea/models/actions"
+	_ "code.gitea.io/gitea/models/git"
+	_ "code.gitea.io/gitea/models/repo"
+
 	"github.com/stretchr/testify/require"
 	"xorm.io/xorm"
 )
