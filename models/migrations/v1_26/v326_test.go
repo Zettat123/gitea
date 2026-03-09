@@ -6,10 +6,7 @@ package v1_26
 import (
 	"testing"
 
-	_ "code.gitea.io/gitea/models/actions"
-	_ "code.gitea.io/gitea/models/git"
 	"code.gitea.io/gitea/models/migrations/base"
-	_ "code.gitea.io/gitea/models/repo"
 	"code.gitea.io/gitea/modules/setting"
 	"code.gitea.io/gitea/modules/test"
 
