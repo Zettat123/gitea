@@ -546,7 +546,9 @@ func approveRuns(ctx *context_module.Context, runIDs []int64) {
 		return nil
 	})
 	if err != nil {
-		ctx.ServerError("UpdateRunJob", err)
+		ctx.NotFoundOrServerError("approveRuns", func(err error) bool {
+			return errors.Is(err, util.ErrNotExist)
+		}, err)
 		return
 	}
 
@@ -613,6 +615,10 @@ func getRunJobsAndCurrentJob(ctx *context_module.Context, runID int64) (*actions
 		return nil, nil, nil
 	}
 
+	for _, job := range jobs {
+		job.Run = run
+	}
+
 	current := jobs[0]
 	if ctx.PathParam("job") != "" {
 		jobID := ctx.PathParamInt64("job")
@@ -623,6 +629,7 @@ func getRunJobsAndCurrentJob(ctx *context_module.Context, runID int64) (*actions
 			}, err)
 			return nil, nil, nil
 		}
+		current.Run = run
 	}
 
 	return run, jobs, current

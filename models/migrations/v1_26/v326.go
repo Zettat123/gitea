@@ -150,6 +150,9 @@ func getRepoLinkCached(x *xorm.Engine, cache map[int64]string, repoID int64) (st
 func getRunByIndexCached(x *xorm.Engine, cache map[int64]map[int64]*migrationActionRun, repoID, runIndex int64) (*migrationActionRun, error) {
 	if repoCache, ok := cache[repoID]; ok {
 		if run, ok := repoCache[runIndex]; ok {
+			if run == nil {
+				return nil, fmt.Errorf("run repo_id=%d run_index=%d not found", repoID, runIndex)
+			}
 			return run, nil
 		}
 	}

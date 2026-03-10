@@ -71,7 +71,7 @@ jobs:
 		req = NewRequest(t, "GET", fmt.Sprintf("/%s/%s/actions/runs/%d/workflow", user2.Name, repo1.Name, run2.ID))
 		user2Session.MakeRequest(t, req, http.StatusNotFound)
 		req = NewRequest(t, "POST", fmt.Sprintf("/%s/%s/actions/runs/%d/approve", user2.Name, repo1.Name, run2.ID))
-		user2Session.MakeRequest(t, req, http.StatusInternalServerError)
+		user2Session.MakeRequest(t, req, http.StatusNotFound)
 		req = NewRequest(t, "POST", fmt.Sprintf("/%s/%s/actions/runs/%d/cancel", user2.Name, repo1.Name, run2.ID))
 		user2Session.MakeRequest(t, req, http.StatusNotFound)
 		req = NewRequest(t, "POST", fmt.Sprintf("/%s/%s/actions/runs/%d/delete", user2.Name, repo1.Name, run2.ID))
