@@ -124,6 +124,7 @@ jobs:
 
 		var (
 			callerRunID     int64
+			prepareJobID    int64
 			callerJob1ID    int64
 			reusable1Job2ID int64
 			callerJob2ID    int64
@@ -137,6 +138,7 @@ jobs:
 			prepareJob := unittest.AssertExistsAndLoadBean(t, &actions_model.ActionRunJob{RunID: callerRun.ID, JobID: "prepare"})
 			assert.Equal(t, actions_model.StatusWaiting, prepareJob.Status)
 			assert.False(t, prepareJob.IsReusableCall)
+			prepareJobID = prepareJob.ID
 			callerJob1 := unittest.AssertExistsAndLoadBean(t, &actions_model.ActionRunJob{RunID: callerRun.ID, JobID: "caller_job1"})
 			assert.Equal(t, actions_model.StatusBlocked, callerJob1.Status)
 			assert.True(t, callerJob1.IsReusableCall)
@@ -308,6 +310,80 @@ jobs:
 
 			callerRun = unittest.AssertExistsAndLoadBean(t, &actions_model.ActionRun{ID: callerRunID})
 			assert.Equal(t, actions_model.StatusSuccess, callerRun.Status)
+		})
+
+		t.Run("Rerun 'prepare' job and Rerun 'Caller' run", func(t *testing.T) {
+			testCases := []struct {
+				name     string
+				rerunURL string
+			}{
+				{"prepare_job", fmt.Sprintf("/%s/%s/actions/runs/%d/jobs/%d/rerun", repo.OwnerName, repo.Name, callerRunID, prepareJobID)},
+				{"caller_run", fmt.Sprintf("/%s/%s/actions/runs/%d/rerun", repo.OwnerName, repo.Name, callerRunID)},
+			}
+
+			for _, tc := range testCases {
+				t.Run("Rerun "+tc.name, func(t *testing.T) {
+					req = NewRequest(t, "POST", tc.rerunURL)
+					user2Session.MakeRequest(t, req, http.StatusOK)
+
+					callerRun := unittest.AssertExistsAndLoadBean(t, &actions_model.ActionRun{ID: callerRunID})
+					assert.Equal(t, actions_model.StatusWaiting, callerRun.Status)
+					prepareJob := unittest.AssertExistsAndLoadBean(t, &actions_model.ActionRunJob{ID: prepareJobID})
+					assert.Equal(t, actions_model.StatusWaiting, prepareJob.Status)
+					callerJob1 := unittest.AssertExistsAndLoadBean(t, &actions_model.ActionRunJob{ID: callerJob1ID})
+					assert.Equal(t, actions_model.StatusBlocked, callerJob1.Status)
+					callerJob2 := unittest.AssertExistsAndLoadBean(t, &actions_model.ActionRunJob{ID: callerJob2ID})
+					assert.Equal(t, actions_model.StatusBlocked, callerJob2.Status)
+
+					prepareTask := defaultRunner.fetchTask(t)
+					_, prepareJob, _ = getTaskAndJobAndRunByTaskID(t, prepareTask.Id)
+					assert.Equal(t, "prepare", prepareJob.JobID)
+					defaultRunner.execTask(t, prepareTask, &mockTaskOutcome{
+						result: runnerv1.Result_RESULT_SUCCESS,
+						outputs: map[string]string{
+							"prepare_out": "prepared_data_updated",
+						},
+					})
+
+					reusable1Job1Task := defaultRunner.fetchTask(t)
+					_, reusable1Job1, _ := getTaskAndJobAndRunByTaskID(t, reusable1Job1Task.Id)
+					assert.Equal(t, "reusable1_job1", reusable1Job1.JobID)
+					payload := getWorkflowCallPayloadFromTask(t, reusable1Job1Task)
+					if assert.Len(t, payload.Inputs, 5) {
+						assert.Equal(t, "prepared_data_updated", payload.Inputs["needs_out"])
+					}
+					defaultRunner.execTask(t, reusable1Job1Task, &mockTaskOutcome{
+						result: runnerv1.Result_RESULT_SUCCESS,
+					})
+
+					reusable1Job2Task := customRunner.fetchTask(t)
+					_, reusable1Job2, _ := getTaskAndJobAndRunByTaskID(t, reusable1Job2Task.Id)
+					assert.Equal(t, "reusable1_job2", reusable1Job2.JobID)
+					customRunner.execTask(t, reusable1Job2Task, &mockTaskOutcome{
+						result: runnerv1.Result_RESULT_SUCCESS,
+						outputs: map[string]string{
+							"r1j2_out": "r1j2_out_data_rerun_prepare",
+						},
+					})
+
+					callerJob2Task := defaultRunner.fetchTask(t)
+					_, callerJob2, _ = getTaskAndJobAndRunByTaskID(t, callerJob2Task.Id)
+					assert.Equal(t, "caller_job2", callerJob2.JobID)
+					if assert.Len(t, callerJob2Task.Needs, 1) {
+						assert.Contains(t, callerJob2Task.Needs, "caller_job1")
+						assert.Equal(t, runnerv1.Result_RESULT_SUCCESS, callerJob2Task.Needs["caller_job1"].Result)
+						if assert.Len(t, callerJob2Task.Needs["caller_job1"].Outputs, 1) {
+							assert.Equal(t, "r1j2_out_data_rerun_prepare", callerJob2Task.Needs["caller_job1"].Outputs["r1_out"])
+						}
+					}
+					defaultRunner.execTask(t, callerJob2Task, &mockTaskOutcome{
+						result: runnerv1.Result_RESULT_SUCCESS,
+					})
+
+					callerRun = unittest.AssertExistsAndLoadBean(t, &actions_model.ActionRun{ID: callerRunID})
+					assert.Equal(t, actions_model.StatusSuccess, callerRun.Status)
+				})
+			}
 		})
 	})
 }
