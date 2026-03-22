@@ -7,7 +7,14 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
 
+	"code.gitea.io/gitea/modules/container"
+	"code.gitea.io/gitea/modules/util"
+
+	"github.com/nektos/act/pkg/exprparser"
 	"github.com/nektos/act/pkg/model"
 	"go.yaml.in/yaml/v4"
 )
@@ -264,6 +271,229 @@ func EvaluateConcurrency(rc *model.RawConcurrency, jobID string, job *Job, gitCt
 	return evaluated.Group, evaluated.CancelInProgress == "true", nil
 }
 
+// EvaluateWorkflowCallInputs evaluates reusable workflow call inputs and returns the final input map.
+func EvaluateWorkflowCallInputs(workflow *model.Workflow, jobID string, job *Job, gitCtx map[string]any, results map[string]*JobResult, vars map[string]string, inputs map[string]any) (map[string]any, error) {
+	cfg := workflow.WorkflowCallConfig()
+	if len(cfg.Inputs) == 0 {
+		return map[string]any{}, nil
+	}
+
+	provided := make(container.Set[string], len(job.With))
+
+	inputsWithDefaults := make(map[string]any)
+	for name, input := range cfg.Inputs {
+		if input.Type == "" {
+			return nil, fmt.Errorf("workflow_call input %q is missing required field \"type\"", name)
+		}
+
+		if input.Default == "" {
+			continue
+		}
+
+		switch input.Type {
+		case "string":
+			inputsWithDefaults[name] = input.Default
+		case "boolean":
+			v, err := strconv.ParseBool(input.Default)
+			if err != nil {
+				return nil, fmt.Errorf("parse workflow_call input %q default: %w", name, err)
+			}
+			inputsWithDefaults[name] = v
+		case "number":
+			v, err := util.ToFloat64(input.Default)
+			if err != nil {
+				return nil, fmt.Errorf("parse workflow_call input %q default: %w", name, err)
+			}
+			inputsWithDefaults[name] = v
+		default:
+			return nil, fmt.Errorf("unknown workflow_call input type %q", input.Type)
+		}
+	}
+
+	actJob := &model.Job{
+		Strategy: &model.Strategy{
+			FailFastString:    job.Strategy.FailFastString,
+			MaxParallelString: job.Strategy.MaxParallelString,
+			RawMatrix:         job.Strategy.RawMatrix,
+		},
+	}
+	actJob.Strategy.FailFast = actJob.Strategy.GetFailFast()
+	actJob.Strategy.MaxParallel = actJob.Strategy.GetMaxParallel()
+	matrix := make(map[string]any)
+	matrixes, err := actJob.GetMatrixes()
+	if err != nil {
+		return nil, err
+	}
+	if len(matrixes) > 0 {
+		matrix = matrixes[0]
+	}
+
+	evaluator := NewExpressionEvaluator(NewInterpeter(jobID, actJob, matrix, toGitContext(gitCtx), results, vars, inputs))
+	for k, v := range job.With {
+		wcInput, ok := cfg.Inputs[k]
+		if !ok {
+			continue
+		}
+		provided.Add(k)
+
+		var out any
+		switch val := v.(type) {
+		case string:
+			var node yaml.Node
+			if err := node.Encode(val); err != nil {
+				return nil, fmt.Errorf("encode workflow_call input %q: %w", k, err)
+			}
+			if err := evaluator.EvaluateYamlNode(&node); err != nil {
+				return nil, fmt.Errorf("evaluate workflow_call input %q: %w", k, err)
+			}
+			if err := node.Decode(&out); err != nil {
+				return nil, fmt.Errorf("decode workflow_call input %q: %w", k, err)
+			}
+		default:
+			out = v
+		}
+
+		switch wcInput.Type {
+		case "string":
+			inputsWithDefaults[k] = out
+		case "boolean":
+			switch out.(type) {
+			case bool:
+				inputsWithDefaults[k] = out
+			default:
+				return nil, fmt.Errorf("workflow_call input %q expects boolean", k)
+			}
+		case "number":
+			f, err := util.ToFloat64(out)
+			if err != nil {
+				return nil, fmt.Errorf("workflow_call input %q expects number: %w", k, err)
+			}
+			inputsWithDefaults[k] = f
+		default:
+			return nil, fmt.Errorf("unknown workflow_call input type %q for input %q", wcInput.Type, k)
+		}
+	}
+
+	for name, input := range cfg.Inputs {
+		if input.Required {
+			if provided.Contains(name) {
+				continue
+			}
+			if input.Default == "" {
+				return nil, fmt.Errorf("workflow_call input %q is required", name)
+			}
+		}
+	}
+
+	return inputsWithDefaults, nil
+}
+
+var workflowCallSecretExpr = regexp.MustCompile(`^\$\{\{\s*secrets\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}$`)
+
+// EvaluateWorkflowCallSecrets evaluates reusable workflow call secrets mapping.
+// It only accepts values in the form "${{ secrets.NAME }}".
+func EvaluateWorkflowCallSecrets(workflow *model.Workflow, job *Job) (map[string]string, error) {
+	cfg := workflow.WorkflowCallConfig()
+	if len(cfg.Secrets) == 0 {
+		return map[string]string{}, nil
+	}
+
+	allowed := cfg.Secrets
+	secrets := make(map[string]string)
+
+	if job == nil || job.RawSecrets.IsZero() {
+		for name, secret := range allowed {
+			if secret.Required {
+				return nil, fmt.Errorf("workflow_call secret %q is required", name)
+			}
+		}
+		return secrets, nil
+	}
+
+	var raw map[string]string
+	if err := job.RawSecrets.Decode(&raw); err != nil {
+		return nil, fmt.Errorf("decode secrets: %w", err)
+	}
+
+	for name, val := range raw {
+		secretName, err := parseWorkflowCallSecretValue(val)
+		if err != nil {
+			return nil, fmt.Errorf("workflow_call secret %q: %w", name, err)
+		}
+		if _, ok := allowed[name]; !ok {
+			return nil, fmt.Errorf("workflow_call secret %q is not declared", name)
+		}
+		secrets[name] = secretName
+	}
+
+	for name, secret := range allowed {
+		if secret.Required {
+			if _, ok := secrets[name]; !ok {
+				return nil, fmt.Errorf("workflow_call secret %q is required", name)
+			}
+		}
+	}
+
+	return secrets, nil
+}
+
+func parseWorkflowCallSecretValue(val string) (string, error) {
+	matches := workflowCallSecretExpr.FindStringSubmatch(val)
+	if len(matches) != 2 {
+		return "", errors.New("secret value must be in the form \"${{ secrets.NAME }}\"")
+	}
+	return matches[1], nil
+}
+
+// EvaluateWorkflowCallOutputs evaluates reusable workflow call outputs with expression support.
+// It accepts any valid expression and evaluates it using the provided contexts.
+func EvaluateWorkflowCallOutputs(workflow *model.Workflow, gitCtx map[string]any, vars map[string]string, inputs map[string]any, jobOutputs map[string]map[string]string) (map[string]string, error) {
+	cfg := workflow.WorkflowCallConfig()
+	if len(cfg.Outputs) == 0 {
+		return map[string]string{}, nil
+	}
+
+	jobsCtx := make(map[string]*model.WorkflowCallResult, len(jobOutputs))
+	for jobID, outputs := range jobOutputs {
+		jobsCtx[jobID] = &model.WorkflowCallResult{Outputs: outputs}
+	}
+
+	env := &exprparser.EvaluationEnvironment{
+		Github: toGitContext(gitCtx),
+		Vars:   vars,
+		Inputs: inputs,
+		Jobs:   &jobsCtx,
+	}
+	interpreter := exprparser.NewInterpeter(env, exprparser.Config{})
+
+	result := make(map[string]string, len(cfg.Outputs))
+	for name, outputItem := range cfg.Outputs {
+		value, err := evaluateWorkflowCallOutputValue(interpreter, outputItem.Value)
+		if err != nil {
+			return nil, fmt.Errorf("workflow_call output %q: %w", name, err)
+		}
+		result[name] = value
+	}
+
+	return result, nil
+}
+
+func evaluateWorkflowCallOutputValue(interpreter exprparser.Interpreter, value string) (string, error) {
+	if !strings.Contains(value, "${{") || !strings.Contains(value, "}}") {
+		return value, nil
+	}
+	expr, _ := rewriteSubExpression(value, true)
+	evaluated, err := interpreter.Evaluate(expr, exprparser.DefaultStatusCheckNone)
+	if err != nil {
+		return "", err
+	}
+	str, ok := evaluated.(string)
+	if !ok {
+		return "", fmt.Errorf("expression %q did not evaluate to a string", expr)
+	}
+	return str, nil
+}
+
 func toGitContext(input map[string]any) *model.GithubContext {
 	gitContext := &model.GithubContext{
 		EventPath:        asString(input["event_path"]),
@@ -400,8 +630,13 @@ func ParseRawOn(rawOn *yaml.Node) ([]*Event, error) {
 							}
 							acts[act] = []string{t}
 						case yaml.MappingNode:
-							if k != "workflow_dispatch" || act != "inputs" {
-								return nil, fmt.Errorf("map should only for workflow_dispatch but %s: %#v", act, content)
+							if k != "workflow_dispatch" && k != "workflow_call" {
+								return nil, fmt.Errorf("map should only for workflow_dispatch or workflow_call but %s: %#v", act, content)
+							}
+							if act != "inputs" {
+								// workflow_call may also contain "secrets" and "outputs".
+								// They are parsed elsewhere, here we only need to avoid treating them as invalid workflows.
+								break
 							}
 
 							var key string

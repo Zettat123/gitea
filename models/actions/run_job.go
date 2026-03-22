@@ -56,6 +56,33 @@ type ActionRunJob struct {
 	// It is JSON-encoded repo_model.ActionsTokenPermissions and may be empty if not specified.
 	TokenPermissions *repo_model.ActionsTokenPermissions `xorm:"JSON TEXT"`
 
+	// IsReusableCall indicates this job is a reusable workflow caller job ("uses: ./.gitea/workflows/*.yml@...").
+	// It doesn't run on a runner, but groups the reusable workflow's expanded jobs.
+	IsReusableCall bool `xorm:"index NOT NULL DEFAULT FALSE"`
+	// ReusableWorkflowUses stores the raw "uses" value of a reusable workflow caller job.
+	// It should only be set for reusable workflow caller jobs (IsReusableCall == true).
+	ReusableWorkflowUses string `xorm:"VARCHAR(255)"`
+	// ParentCallJobID indicates this job belongs to a reusable workflow caller job.
+	// It's the ID of the parent ActionRunJob (the caller job). 0 means this job is not a child job of a reusable call.
+	ParentCallJobID int64 `xorm:"index NOT NULL DEFAULT 0"`
+	// RootCallJobID indicates the outermost reusable workflow caller job this job belongs to.
+	// It's the ID of the root caller ActionRunJob. 0 means this job is not inside a reusable call.
+	RootCallJobID int64 `xorm:"index NOT NULL DEFAULT 0"`
+	// CallDepth is the nested depth of reusable workflow calls.
+	// 0 means this job is in the root workflow (including caller jobs). Child jobs have depth >= 1.
+	CallDepth int `xorm:"index NOT NULL DEFAULT 0"`
+	// CallEventPayload is the event payload for reusable workflow call.
+	// It should only be set for reusable workflow caller jobs (IsReusableCall == true).
+	CallEventPayload string `xorm:"LONGTEXT"`
+	// CallSecretsInherit indicates the caller job uses "secrets: inherit" when calling a reusable workflow.
+	// It should only be set for reusable workflow caller jobs (IsReusableCall == true).
+	CallSecretsInherit bool `xorm:"NOT NULL DEFAULT FALSE"`
+	// CallSecretNames stores the reusable workflow call secrets mapping, encoded as JSON.
+	// Key is the secret name expected by the called workflow (declared in "on.workflow_call.secrets"),
+	// value is the secret name referenced from the caller workflow ("${{ secrets.NAME }}"), e.g. {"parent_token":"mysecret"}.
+	// It should only be set for reusable workflow caller jobs (IsReusableCall == true).
+	CallSecretNames string `xorm:"LONGTEXT"`
+
 	Started timeutil.TimeStamp
 	Stopped timeutil.TimeStamp
 	Created timeutil.TimeStamp `xorm:"created"`
@@ -150,6 +177,24 @@ func GetRunJobByRunAndID(ctx context.Context, runID, jobID int64) (*ActionRunJob
 func GetRunJobsByRunID(ctx context.Context, runID int64) (ActionJobList, error) {
 	var jobs []*ActionRunJob
 	if err := db.GetEngine(ctx).Where("run_id=?", runID).OrderBy("id").Find(&jobs); err != nil {
+		return nil, err
+	}
+	return jobs, nil
+}
+
+func GetReusableCallerChildJobs(ctx context.Context, callerJob *ActionRunJob) (ActionJobList, error) {
+	if callerJob == nil || callerJob.ID <= 0 || callerJob.RunID <= 0 || callerJob.RepoID <= 0 {
+		return nil, util.NewInvalidArgumentErrorf("invalid caller job")
+	}
+	var jobs []*ActionRunJob
+	if err := db.GetEngine(ctx).
+		Where(builder.Eq{
+			"run_id":             callerJob.RunID,
+			"repo_id":            callerJob.RepoID,
+			"parent_call_job_id": callerJob.ID,
+		}).
+		OrderBy("id").
+		Find(&jobs); err != nil {
 		return nil, err
 	}
 	return jobs, nil

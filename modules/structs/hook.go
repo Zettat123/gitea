@@ -565,6 +565,25 @@ func (p *WorkflowDispatchPayload) JSONPayload() ([]byte, error) {
 	return json.MarshalIndent(p, "", "  ")
 }
 
+// WorkflowCallPayload represents a workflow_call payload.
+type WorkflowCallPayload struct {
+	// The name or path of the caller workflow file
+	Workflow string `json:"workflow"`
+	// The git reference (branch, tag, or commit SHA) to run the workflow on
+	Ref string `json:"ref"`
+	// Input parameters for the reusable workflow call
+	Inputs map[string]any `json:"inputs"`
+	// The repository containing the workflow
+	Repository *Repository `json:"repository"`
+	// The user who triggered the caller workflow
+	Sender *User `json:"sender"`
+}
+
+// JSONPayload implements Payload
+func (p *WorkflowCallPayload) JSONPayload() ([]byte, error) {
+	return json.MarshalIndent(p, "", "  ")
+}
+
 // CommitStatusPayload represents a payload information of commit status event.
 type CommitStatusPayload struct {
 	// TODO: add Branches per https://docs.github.com/en/webhooks/webhook-events-and-payloads#status

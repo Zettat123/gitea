@@ -10,6 +10,7 @@ import (
 	actions_model "code.gitea.io/gitea/models/actions"
 	"code.gitea.io/gitea/models/db"
 	"code.gitea.io/gitea/modules/actions/jobparser"
+	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/util"
 	notify_service "code.gitea.io/gitea/services/notify"
 
@@ -41,7 +42,10 @@ func PrepareRunAndInsert(ctx context.Context, content []byte, run *actions_model
 		}
 	}
 
-	giteaCtx := GenerateGiteaContext(run, nil)
+	giteaCtx, err := GenerateGiteaContext(ctx, run, nil)
+	if err != nil {
+		return fmt.Errorf("GenerateGiteaContext: %w", err)
+	}
 
 	jobs, err := jobparser.Parse(content, jobparser.WithVars(vars), jobparser.WithGitContext(giteaCtx.ToGitHubContext()), jobparser.WithInputs(inputsWithDefaults))
 	if err != nil {
@@ -75,7 +79,9 @@ func PrepareRunAndInsert(ctx context.Context, content []byte, run *actions_model
 // InsertRun inserts a run
 // The title will be cut off at 255 characters if it's longer than 255 characters.
 func InsertRun(ctx context.Context, run *actions_model.ActionRun, jobs []*jobparser.SingleWorkflow, vars map[string]string, inputs map[string]any) error {
-	return db.WithTx(ctx, func(ctx context.Context) error {
+	var readyCallJobs []*actions_model.ActionRunJob
+
+	if err := db.WithTx(ctx, func(ctx context.Context) error {
 		index, err := db.GetNextResourceIndex(ctx, "action_run_index", run.RepoID)
 		if err != nil {
 			return err
@@ -128,11 +134,16 @@ func InsertRun(ctx context.Context, run *actions_model.ActionRun, jobs []*jobpar
 				RunsOn:            job.RunsOn(),
 				Status:            util.Iif(shouldBlockJob, actions_model.StatusBlocked, actions_model.StatusWaiting),
 			}
+
 			// Parse workflow/job permissions (no clamping here)
 			if perms := ExtractJobPermissionsFromWorkflow(v, job); perms != nil {
 				runJob.TokenPermissions = perms
 			}
 
+			if job.Uses != "" {
+				runJob.IsReusableCall = true
+				runJob.ReusableWorkflowUses = job.Uses
+			}
 			// check job concurrency
 			if job.RawConcurrency != nil {
 				rawConcurrency, err := yaml.Marshal(job.RawConcurrency)
@@ -159,12 +170,19 @@ func InsertRun(ctx context.Context, run *actions_model.ActionRun, jobs []*jobpar
 				}
 			}
 
-			hasWaitingJobs = hasWaitingJobs || runJob.Status == actions_model.StatusWaiting
 			if err := db.Insert(ctx, runJob); err != nil {
 				return err
 			}
 
 			runJobs = append(runJobs, runJob)
+
+			if runJob.IsReusableCall {
+				if runJob.Status == actions_model.StatusWaiting {
+					readyCallJobs = append(readyCallJobs, runJob)
+				}
+				continue
+			}
+			hasWaitingJobs = hasWaitingJobs || runJob.Status == actions_model.StatusWaiting
 		}
 
 		run.Status = actions_model.AggregateJobStatus(runJobs)
@@ -180,5 +198,15 @@ func InsertRun(ctx context.Context, run *actions_model.ActionRun, jobs []*jobpar
 		}
 
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+
+	for _, callJob := range readyCallJobs {
+		if err := ExpandReusableCallJob(ctx, callJob); err != nil {
+			log.Error("expand reusable workflow for run %d job %d: %v", callJob.RunID, callJob.ID, err)
+		}
+	}
+
+	return nil
 }

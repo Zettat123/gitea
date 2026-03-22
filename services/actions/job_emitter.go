@@ -4,9 +4,11 @@
 package actions
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	actions_model "code.gitea.io/gitea/models/actions"
 	"code.gitea.io/gitea/models/db"
@@ -15,6 +17,7 @@ import (
 	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/queue"
 	"code.gitea.io/gitea/modules/setting"
+	"code.gitea.io/gitea/modules/timeutil"
 	"code.gitea.io/gitea/modules/util"
 	notify_service "code.gitea.io/gitea/services/notify"
 
@@ -89,6 +92,15 @@ func checkJobsByRunID(ctx context.Context, runID int64) error {
 	}); err != nil {
 		return err
 	}
+
+	for _, job := range updatedJobs {
+		if job.Status == actions_model.StatusWaiting && job.IsReusableCall {
+			if err := ExpandReusableCallJob(ctx, job); err != nil {
+				log.Error("expand reusable workflow for run %d job %d: %v", job.RunID, job.ID, err)
+			}
+		}
+	}
+
 	CreateCommitStatusForRunJobs(ctx, run, jobs...)
 	for _, job := range updatedJobs {
 		_ = job.LoadAttributes(ctx)
@@ -212,8 +224,29 @@ func checkJobsOfRun(ctx context.Context, run *actions_model.ActionRun) (jobs, up
 			job.Run = run
 		}
 
+		originalStatuses := make(map[int64]actions_model.Status, len(jobs))
+		for _, job := range jobs {
+			originalStatuses[job.ID] = job.Status
+		}
+
+		childJobsByCaller := make(map[int64][]*actions_model.ActionRunJob)
+		for _, job := range jobs {
+			if job.ParentCallJobID > 0 {
+				childJobsByCaller[job.ParentCallJobID] = append(childJobsByCaller[job.ParentCallJobID], job)
+			}
+		}
+
+		// Reusable workflow caller jobs are group jobs whose statuses are derived from their child jobs.
+		// Apply derived statuses before resolving blocked jobs so downstream jobs can be unblocked in the same check.
+		applyDerivedStatusToReusableCallers(jobs, childJobsByCaller)
+
 		updates := newJobStatusResolver(jobs, vars).Resolve(ctx)
 		for _, job := range jobs {
+			// Reusable workflow caller jobs are group jobs. Their statuses are derived from their child jobs
+			// and should not be updated by the needs-based blocked-job resolver once expanded (child jobs exist).
+			if job.IsReusableCall && len(childJobsByCaller[job.ID]) > 0 {
+				continue
+			}
 			if status, ok := updates[job.ID]; ok {
 				job.Status = status
 				if n, err := actions_model.UpdateRunJob(ctx, job, builder.Eq{"status": actions_model.StatusBlocked}, "status"); err != nil {
@@ -224,6 +257,43 @@ func checkJobsOfRun(ctx context.Context, run *actions_model.ActionRun) (jobs, up
 				updatedJobs = append(updatedJobs, job)
 			}
 		}
+
+		// Re-calculate derived statuses after we have updated job statuses, so caller jobs reflect the latest children statuses.
+		applyDerivedStatusToReusableCallers(jobs, childJobsByCaller)
+
+		now := timeutil.TimeStampNow()
+		for _, caller := range jobs {
+			if !caller.IsReusableCall {
+				continue
+			}
+			children := childJobsByCaller[caller.ID]
+			if len(children) == 0 {
+				continue
+			}
+
+			newStatus := caller.Status
+			updateCols := make([]string, 0, 3)
+			if originalStatuses[caller.ID] != newStatus {
+				updateCols = append(updateCols, "status")
+			}
+			if caller.Started.IsZero() && newStatus.IsRunning() {
+				caller.Started = now
+				updateCols = append(updateCols, "started")
+			}
+			if caller.Stopped.IsZero() && newStatus.IsDone() {
+				caller.Stopped = now
+				updateCols = append(updateCols, "stopped")
+			}
+			if len(updateCols) == 0 {
+				continue
+			}
+
+			if _, err := actions_model.UpdateRunJob(ctx, caller, nil, updateCols...); err != nil {
+				return err
+			}
+			updatedJobs = append(updatedJobs, caller)
+		}
+
 		return nil
 	}); err != nil {
 		return nil, nil, err
@@ -249,19 +319,24 @@ type jobStatusResolver struct {
 }
 
 func newJobStatusResolver(jobs actions_model.ActionJobList, vars map[string]string) *jobStatusResolver {
-	idToJobs := make(map[string][]*actions_model.ActionRunJob, len(jobs))
+	idToJobs := make(map[int64]map[string][]*actions_model.ActionRunJob)
 	jobMap := make(map[int64]*actions_model.ActionRunJob)
 	for _, job := range jobs {
-		idToJobs[job.JobID] = append(idToJobs[job.JobID], job)
+		scopeKey := job.ParentCallJobID
+		if idToJobs[scopeKey] == nil {
+			idToJobs[scopeKey] = make(map[string][]*actions_model.ActionRunJob)
+		}
+		idToJobs[scopeKey][job.JobID] = append(idToJobs[scopeKey][job.JobID], job)
 		jobMap[job.ID] = job
 	}
 
 	statuses := make(map[int64]actions_model.Status, len(jobs))
 	needs := make(map[int64][]int64, len(jobs))
 	for _, job := range jobs {
+		scopeKey := job.ParentCallJobID
 		statuses[job.ID] = job.Status
 		for _, need := range job.Needs {
-			for _, v := range idToJobs[need] {
+			for _, v := range idToJobs[scopeKey][need] {
 				needs[job.ID] = append(needs[job.ID], v.ID)
 			}
 		}
@@ -371,4 +446,30 @@ func updateConcurrencyEvaluationForJobWithNeeds(ctx context.Context, actionRunJo
 		return fmt.Errorf("update run job: %w", err)
 	}
 	return nil
+}
+
+func applyDerivedStatusToReusableCallers(jobs []*actions_model.ActionRunJob, childJobsByCaller map[int64][]*actions_model.ActionRunJob) {
+	callers := make([]*actions_model.ActionRunJob, 0, len(childJobsByCaller))
+	for _, job := range jobs {
+		if !job.IsReusableCall {
+			continue
+		}
+		if len(childJobsByCaller[job.ID]) == 0 {
+			continue
+		}
+		callers = append(callers, job)
+	}
+
+	// Derived status for nested reusable workflows must be computed from inner to outer.
+	slices.SortFunc(callers, func(a, b *actions_model.ActionRunJob) int {
+		if a.CallDepth != b.CallDepth {
+			return b.CallDepth - a.CallDepth // deeper first
+		}
+		return cmp.Compare(b.ID, a.ID)
+	})
+
+	for _, caller := range callers {
+		children := childJobsByCaller[caller.ID]
+		caller.Status = actions_model.AggregateJobStatus(children)
+	}
 }

@@ -11,6 +11,7 @@ import (
 	actions_model "code.gitea.io/gitea/models/actions"
 	"code.gitea.io/gitea/models/db"
 	actions_module "code.gitea.io/gitea/modules/actions"
+	"code.gitea.io/gitea/modules/json"
 	"code.gitea.io/gitea/modules/log"
 	secret_module "code.gitea.io/gitea/modules/secret"
 	"code.gitea.io/gitea/modules/setting"
@@ -182,6 +183,32 @@ func GetSecretsOfTask(ctx context.Context, task *actions_model.ActionTask) (map[
 			continue
 		}
 		secrets[secret.Name] = v
+	}
+
+	if task.Job.ParentCallJobID > 0 {
+		callerJob, err := actions_model.GetRunJobByRepoAndID(ctx, task.Job.RepoID, task.Job.ParentCallJobID)
+		if err != nil {
+			return nil, fmt.Errorf("GetRunJobByRepoAndID: %w", err)
+		}
+		if !callerJob.CallSecretsInherit {
+			// For reusable workflow child jobs, only expose explicitly mapped secrets, plus tokens.
+			filteredSecrets := map[string]string{}
+			filteredSecrets["GITHUB_TOKEN"] = secrets["GITHUB_TOKEN"]
+			filteredSecrets["GITEA_TOKEN"] = secrets["GITEA_TOKEN"]
+
+			if callerJob.CallSecretNames != "" {
+				var mapping map[string]string
+				if err := json.Unmarshal([]byte(callerJob.CallSecretNames), &mapping); err != nil {
+					return nil, fmt.Errorf("unmarshal reusable workflow call secrets mapping for caller job %d: %w", callerJob.ID, err)
+				}
+				for alias, sourceName := range mapping {
+					if v, ok := secrets[strings.ToUpper(sourceName)]; ok {
+						filteredSecrets[alias] = v
+					}
+				}
+			}
+			secrets = filteredSecrets
+		}
 	}
 
 	return secrets, nil

@@ -11,22 +11,27 @@ import (
 	actions_model "code.gitea.io/gitea/models/actions"
 	"code.gitea.io/gitea/models/db"
 	actions_module "code.gitea.io/gitea/modules/actions"
+	"code.gitea.io/gitea/modules/actions/jobparser"
 	"code.gitea.io/gitea/modules/container"
 	"code.gitea.io/gitea/modules/git"
 	"code.gitea.io/gitea/modules/json"
 	"code.gitea.io/gitea/modules/setting"
+	api "code.gitea.io/gitea/modules/structs"
 	"code.gitea.io/gitea/modules/util"
 
-	"github.com/nektos/act/pkg/model"
+	act_pkg_model "github.com/nektos/act/pkg/model"
+	"go.yaml.in/yaml/v4"
 )
 
 type GiteaContext map[string]any
 
 // GenerateGiteaContext generate the gitea context without token and gitea_runtime_token
 // job can be nil when generating a context for parsing workflow-level expressions
-func GenerateGiteaContext(run *actions_model.ActionRun, job *actions_model.ActionRunJob) GiteaContext {
+func GenerateGiteaContext(ctx context.Context, run *actions_model.ActionRun, job *actions_model.ActionRunJob) (GiteaContext, error) {
 	event := map[string]any{}
-	_ = json.Unmarshal([]byte(run.EventPayload), &event)
+	if err := json.Unmarshal([]byte(run.EventPayload), &event); err != nil {
+		return nil, err
+	}
 
 	baseRef := ""
 	headRef := ""
@@ -91,9 +96,23 @@ func GenerateGiteaContext(run *actions_model.ActionRun, job *actions_model.Actio
 		gitContext["job"] = job.JobID
 		gitContext["run_id"] = strconv.FormatInt(job.RunID, 10)
 		gitContext["run_attempt"] = strconv.FormatInt(job.Attempt, 10)
+
+		if job.ParentCallJobID > 0 {
+			callerJob, err := actions_model.GetRunJobByRepoAndID(ctx, job.RepoID, job.ParentCallJobID)
+			if err != nil {
+				return nil, err
+			}
+			if callerJob.CallEventPayload != "" {
+				callEvent := map[string]any{}
+				if err := json.Unmarshal([]byte(callerJob.CallEventPayload), &callEvent); err != nil {
+					return nil, fmt.Errorf("unmarshal workflow_call payload for caller job %d: %w", callerJob.ID, err)
+				}
+				gitContext["event"] = callEvent
+			}
+		}
 	}
 
-	return gitContext
+	return gitContext, nil
 }
 
 type TaskNeed struct {
@@ -114,17 +133,40 @@ func FindTaskNeeds(ctx context.Context, job *actions_model.ActionRunJob) (map[st
 	}
 
 	jobIDJobs := make(map[string][]*actions_model.ActionRunJob)
-	for _, job := range jobs {
-		jobIDJobs[job.JobID] = append(jobIDJobs[job.JobID], job)
+	for _, candidate := range jobs {
+		// "needs" references must be resolved within the same reusable workflow call scope.
+		if candidate.ParentCallJobID != job.ParentCallJobID {
+			continue
+		}
+		jobIDJobs[candidate.JobID] = append(jobIDJobs[candidate.JobID], candidate)
 	}
 
 	ret := make(map[string]*TaskNeed, len(needs))
+	reusableCallerOutputsCache := make(map[int64]map[string]string)
 	for jobID, jobsWithSameID := range jobIDJobs {
 		if !needs.Contains(jobID) {
 			continue
 		}
 		var jobOutputs map[string]string
 		for _, job := range jobsWithSameID {
+			if job.IsReusableCall && job.TaskID == 0 && job.Status.IsDone() {
+				outputs, ok := reusableCallerOutputsCache[job.ID]
+				if !ok {
+					var err error
+					outputs, err = computeReusableCallerOutputs(ctx, job)
+					if err != nil {
+						return nil, err
+					}
+					reusableCallerOutputsCache[job.ID] = outputs
+				}
+				if len(jobOutputs) == 0 {
+					jobOutputs = outputs
+				} else {
+					jobOutputs = mergeTwoOutputs(outputs, jobOutputs)
+				}
+				continue
+			}
+
 			if job.TaskID == 0 || !job.Status.IsDone() {
 				// it shouldn't happen, or the job has been rerun
 				continue
@@ -151,6 +193,105 @@ func FindTaskNeeds(ctx context.Context, job *actions_model.ActionRunJob) (map[st
 	return ret, nil
 }
 
+func computeReusableCallerOutputs(ctx context.Context, callerJob *actions_model.ActionRunJob) (map[string]string, error) {
+	cache := make(map[int64]map[string]string)
+	return computeReusableCallerOutputsInternal(ctx, callerJob, cache)
+}
+
+func computeReusableCallerOutputsInternal(ctx context.Context, callerJob *actions_model.ActionRunJob, cache map[int64]map[string]string) (map[string]string, error) {
+	if callerJob == nil || !callerJob.IsReusableCall || callerJob.ReusableWorkflowUses == "" {
+		return map[string]string{}, nil
+	}
+
+	if cached, ok := cache[callerJob.ID]; ok {
+		return cached, nil
+	}
+
+	if err := callerJob.LoadAttributes(ctx); err != nil {
+		return nil, err
+	}
+
+	childJobs, err := actions_model.GetReusableCallerChildJobs(ctx, callerJob)
+	if err != nil {
+		return nil, fmt.Errorf("GetReusableCallerChildJobs: %w", err)
+	}
+	if len(childJobs) == 0 {
+		cache[callerJob.ID] = map[string]string{}
+		return cache[callerJob.ID], nil
+	}
+	for _, child := range childJobs {
+		if !child.Status.IsDone() {
+			cache[callerJob.ID] = map[string]string{}
+			return cache[callerJob.ID], nil
+		}
+	}
+
+	singleWorkflow := &jobparser.SingleWorkflow{}
+	if err := yaml.Unmarshal(childJobs[0].WorkflowPayload, singleWorkflow); err != nil {
+		return nil, fmt.Errorf("unmarshal reusable workflow: %w", err)
+	}
+	workflow := &act_pkg_model.Workflow{RawOn: singleWorkflow.RawOn}
+
+	inputs := map[string]any{}
+	if callerJob.CallEventPayload != "" {
+		var payload api.WorkflowCallPayload
+		if err := json.Unmarshal([]byte(callerJob.CallEventPayload), &payload); err != nil {
+			return nil, fmt.Errorf("unmarshal workflow_call payload for caller job %d: %w", callerJob.ID, err)
+		}
+		if payload.Inputs != nil {
+			inputs = payload.Inputs
+		}
+	}
+
+	gitCtx, err := GenerateGiteaContext(ctx, callerJob.Run, callerJob)
+	if err != nil {
+		return nil, err
+	}
+
+	vars, err := actions_model.GetVariablesOfRun(ctx, callerJob.Run)
+	if err != nil {
+		return nil, fmt.Errorf("GetVariablesOfRun: %w", err)
+	}
+
+	jobOutputs := make(map[string]map[string]string)
+	for _, child := range childJobs {
+		var outputs map[string]string
+		switch {
+		case child.IsReusableCall && child.ReusableWorkflowUses != "":
+			childOutputs, err := computeReusableCallerOutputsInternal(ctx, child, cache)
+			if err != nil {
+				return nil, err
+			}
+			outputs = childOutputs
+		case child.TaskID > 0:
+			got, err := actions_model.FindTaskOutputByTaskID(ctx, child.TaskID)
+			if err != nil {
+				return nil, fmt.Errorf("FindTaskOutputByTaskID: %w", err)
+			}
+			outputs = make(map[string]string, len(got))
+			for _, v := range got {
+				outputs[v.OutputKey] = v.OutputValue
+			}
+		default:
+			outputs = map[string]string{}
+		}
+
+		if len(jobOutputs[child.JobID]) == 0 {
+			jobOutputs[child.JobID] = outputs
+		} else {
+			jobOutputs[child.JobID] = mergeTwoOutputs(outputs, jobOutputs[child.JobID])
+		}
+	}
+
+	outputs, err := jobparser.EvaluateWorkflowCallOutputs(workflow, gitCtx, vars, inputs, jobOutputs)
+	if err != nil {
+		return nil, err
+	}
+
+	cache[callerJob.ID] = outputs
+	return outputs, nil
+}
+
 // mergeTwoOutputs merges two outputs from two different ActionRunJobs
 // Values with the same output name may be overridden. The user should ensure the output names are unique.
 // See https://docs.github.com/en/actions/writing-workflows/workflow-syntax-for-github-actions#using-job-outputs-in-a-matrix-job
@@ -166,8 +307,8 @@ func mergeTwoOutputs(o1, o2 map[string]string) map[string]string {
 	return ret
 }
 
-func (g *GiteaContext) ToGitHubContext() *model.GithubContext {
-	return &model.GithubContext{
+func (g *GiteaContext) ToGitHubContext() *act_pkg_model.GithubContext {
+	return &act_pkg_model.GithubContext{
 		Event:            util.GetMapValueOrDefault(*g, "event", map[string]any(nil)),
 		EventPath:        util.GetMapValueOrDefault(*g, "event_path", ""),
 		Workflow:         util.GetMapValueOrDefault(*g, "workflow", ""),

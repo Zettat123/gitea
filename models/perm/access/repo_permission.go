@@ -379,6 +379,76 @@ func GetActionsUserRepoPermission(ctx context.Context, repo *repo_model.Reposito
 	return perm, nil
 }
 
+// GetActionsUserRepoPermissionByActionRun returns the actions user permissions to the repository.
+//
+// Unlike GetActionsUserRepoPermission, this function doesn't have an ActionTask context and therefore can't
+// apply workflow/job-level token permissions. It is currently only intended for reusable workflow expansion
+// (e.g. checking whether a run can read the called workflow repository).
+func GetActionsUserRepoPermissionByActionRun(ctx context.Context, repo *repo_model.Repository, actionsUser *user_model.User, run *actions_model.ActionRun) (perm Permission, err error) {
+	if actionsUser.ID != user_model.ActionsUserID {
+		return perm, errors.New("api GetActionsUserRepoPermissionByActionRun can only be called by the actions user")
+	}
+
+	if err := repo.LoadUnits(ctx); err != nil {
+		return perm, err
+	}
+
+	// Default deny.
+	perm.SetUnitsWithDefaultAccessMode(repo.Units, perm_model.AccessModeNone)
+
+	// Same-repo: allow write unless it's a fork PR (fork PRs are read-only).
+	if run.RepoID == repo.ID {
+		accessMode := util.Iif(run.IsForkPullRequest, perm_model.AccessModeRead, perm_model.AccessModeWrite)
+		perm.SetUnitsWithDefaultAccessMode(repo.Units, accessMode)
+		return perm, nil
+	}
+
+	// Cross-repo: load the run repo for policy checks.
+	if err := run.LoadRepo(ctx); err != nil {
+		return perm, err
+	}
+
+	// Never grant cross-repo private access for fork PR runs.
+	if run.IsForkPullRequest {
+		// Allow public repository read access if the actions bot can read it.
+		botPerm, err := GetUserRepoPermission(ctx, repo, user_model.NewActionsUser())
+		if err != nil {
+			return perm, err
+		}
+		if botPerm.AccessMode >= perm_model.AccessModeRead {
+			perm.SetUnitsWithDefaultAccessMode(repo.Units, perm_model.AccessModeRead)
+		}
+		return perm, nil
+	}
+
+	// Owner-config allowlist for same-owner cross-repo access.
+	if checkSameOwnerCrossRepoAccess(ctx, run.Repo, repo, false) {
+		perm.SetUnitsWithDefaultAccessMode(repo.Units, perm_model.AccessModeRead)
+		return perm, nil
+	}
+
+	// Fall through to allow public repository read access via botPerm check below.
+	botPerm, err := GetUserRepoPermission(ctx, repo, user_model.NewActionsUser())
+	if err != nil {
+		return perm, err
+	}
+	if botPerm.AccessMode >= perm_model.AccessModeRead {
+		perm.SetUnitsWithDefaultAccessMode(repo.Units, perm_model.AccessModeRead)
+		return perm, nil
+	}
+
+	// Collaborative-owner relationship for private repositories.
+	if repo.IsPrivate && run.Repo.IsPrivate {
+		actionsUnit := repo.MustGetUnit(ctx, unit.TypeActions)
+		if actionsUnit.ActionsConfig().IsCollaborativeOwner(run.Repo.OwnerID) {
+			perm.SetUnitsWithDefaultAccessMode(repo.Units, perm_model.AccessModeRead)
+			return perm, nil
+		}
+	}
+
+	return perm, nil
+}
+
 // GetUserRepoPermission returns the user permissions to the repository
 func GetUserRepoPermission(ctx context.Context, repo *repo_model.Repository, user *user_model.User) (perm Permission, err error) {
 	defer func() {
