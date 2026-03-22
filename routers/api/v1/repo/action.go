@@ -1255,7 +1255,7 @@ func RerunWorkflowRun(ctx *context.APIContext) {
 		return
 	}
 
-	if err := actions_service.RerunWorkflowRunJobs(ctx, ctx.Repo.Repository, run, jobs); err != nil {
+	if err := actions_service.RerunWorkflowRunJobs(ctx, ctx.Repo.Repository, run, jobs, nil); err != nil {
 		handleWorkflowRerunError(ctx, err)
 		return
 	}
@@ -1306,7 +1306,7 @@ func RerunFailedWorkflowRun(ctx *context.APIContext) {
 		return
 	}
 
-	if err := actions_service.RerunWorkflowRunJobs(ctx, ctx.Repo.Repository, run, actions_service.GetFailedRerunJobs(jobs)); err != nil {
+	if err := actions_service.RerunFailedWorkflowRunJobs(ctx, ctx.Repo.Repository, run, jobs); err != nil {
 		handleWorkflowRerunError(ctx, err)
 		return
 	}
@@ -1367,7 +1367,7 @@ func RerunWorkflowJob(ctx *context.APIContext) {
 	}
 
 	targetJob := jobs[jobIdx]
-	if err := actions_service.RerunWorkflowRunJobs(ctx, ctx.Repo.Repository, run, actions_service.GetAllRerunJobs(targetJob, jobs)); err != nil {
+	if err := actions_service.RerunWorkflowRunJobs(ctx, ctx.Repo.Repository, run, jobs, targetJob); err != nil {
 		handleWorkflowRerunError(ctx, err)
 		return
 	}

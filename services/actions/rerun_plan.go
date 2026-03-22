@@ -11,8 +11,8 @@ import (
 	"code.gitea.io/gitea/modules/util"
 )
 
-func buildRerunPlan(jobs []*actions_model.ActionRunJob, targetJob *actions_model.ActionRunJob, isRunBlocked bool) *rerunPlan {
-	builder := newRerunPlanBuilder(jobs, targetJob, isRunBlocked)
+func buildRerunPlan(jobs, targetJobs []*actions_model.ActionRunJob, explicitTargetJobID int64, isRunBlocked bool) *rerunPlan {
+	builder := newRerunPlanBuilder(jobs, targetJobs, explicitTargetJobID, isRunBlocked)
 	return builder.build()
 }
 
@@ -42,76 +42,52 @@ type rerunPlan struct {
 }
 
 type rerunPlanBuilder struct {
-	targetJob    *actions_model.ActionRunJob
-	isRunBlocked bool
+	targetJobs          []*actions_model.ActionRunJob
+	explicitTargetJobID int64
+	isRunBlocked        bool
 
 	// jobByID maps job database ID to job model for quick lookup.
 	jobByID map[int64]*actions_model.ActionRunJob
 
 	graph *rerunGraph
 
-	rerunIDs             container.Set[int64]
-	callerSubtreeIDs     container.Set[int64]
-	expandSubtreeCallers container.Set[int64]
-	ancestorCallerIDs    container.Set[int64]
+	rerunIDs          container.Set[int64]
+	callerSubtreeIDs  container.Set[int64]
+	ancestorCallerIDs container.Set[int64]
 
 	shouldBlockMemo map[int64]bool
 }
 
-func newRerunPlanBuilder(jobs []*actions_model.ActionRunJob, targetJob *actions_model.ActionRunJob, isRunBlocked bool) *rerunPlanBuilder {
+func newRerunPlanBuilder(jobs, targetJobs []*actions_model.ActionRunJob, explicitTargetJobID int64, isRunBlocked bool) *rerunPlanBuilder {
 	jobByID := make(map[int64]*actions_model.ActionRunJob, len(jobs))
 	for _, job := range jobs {
 		jobByID[job.ID] = job
 	}
 
 	return &rerunPlanBuilder{
-		targetJob:            targetJob,
-		isRunBlocked:         isRunBlocked,
-		graph:                newRerunGraph(jobs),
-		jobByID:              jobByID,
-		rerunIDs:             make(container.Set[int64]),
-		callerSubtreeIDs:     make(container.Set[int64]),
-		expandSubtreeCallers: make(container.Set[int64]),
-		ancestorCallerIDs:    make(container.Set[int64]),
-		shouldBlockMemo:      make(map[int64]bool, len(jobs)),
+		targetJobs:          targetJobs,
+		explicitTargetJobID: explicitTargetJobID,
+		isRunBlocked:        isRunBlocked,
+		graph:               newRerunGraph(jobs),
+		jobByID:             jobByID,
+		rerunIDs:            make(container.Set[int64]),
+		callerSubtreeIDs:    make(container.Set[int64]),
+		ancestorCallerIDs:   make(container.Set[int64]),
+		shouldBlockMemo:     make(map[int64]bool, len(jobs)),
 	}
 }
 
-func (b *rerunPlanBuilder) build() *rerunPlan {
-	if b.targetJob == nil {
-		return b.buildWholeRun()
-	}
-	return b.buildSubsetByTarget()
-}
-
-func (b *rerunPlanBuilder) buildWholeRun() *rerunPlan {
-	plan := &rerunPlan{rerunJobIDs: make(container.Set[int64]), shouldBlock: make(map[int64]bool)}
-	for _, job := range b.jobByID {
-		plan.rerunJobIDs.Add(job.ID)
-		b.rerunIDs.Add(job.ID)
-	}
-	for _, job := range b.jobByID {
-		plan.shouldBlock[job.ID] = b.shouldBlockByNeedsAndCaller(job.ID)
-	}
-	return plan
-}
-
-func (b *rerunPlanBuilder) buildSubsetByTarget() *rerunPlan {
-	// 1) Always rerun the selected job and all of its downstream jobs within the same scope.
-	parentCallJobID := b.targetJob.ParentCallJobID
-	for id := range b.graph.collectDownstreamByParentCallJobID(parentCallJobID, b.targetJob.JobID) {
+func (b *rerunPlanBuilder) addSelectionForSeed(targetJob *actions_model.ActionRunJob) {
+	// Always rerun the selected job and all of its downstream jobs within the same scope.
+	parentCallJobID := targetJob.ParentCallJobID
+	for id := range b.graph.collectDownstreamByParentCallJobID(parentCallJobID, targetJob.JobID) {
 		b.rerunIDs.Add(id)
 	}
 
-	// 2) If the selected job is a reusable workflow caller job, rerun its whole child job subtree.
-	if b.targetJob.IsReusableCall {
-		b.expandSubtreeCallers.Add(b.targetJob.ID)
-	}
-
-	// 3) If the selected job is inside a reusable call, rerun all ancestor caller jobs (up to root)
+	// If the selected job is inside a reusable call, rerun all ancestor caller jobs (up to root)
 	// and their downstream jobs. Ancestor caller jobs are not expanded to their sibling subtrees.
-	if b.targetJob.ParentCallJobID > 0 {
-		parentID := b.targetJob.ParentCallJobID
+	if targetJob.ParentCallJobID > 0 {
+		parentID := targetJob.ParentCallJobID
 		for parentID > 0 {
 			parentCaller := b.jobByID[parentID]
 			if parentCaller == nil {
@@ -129,20 +105,35 @@ func (b *rerunPlanBuilder) buildSubsetByTarget() *rerunPlan {
 			parentID = parentCaller.ParentCallJobID
 		}
 	}
+}
 
-	// 4) Expand reusable call subtrees for caller jobs that are part of this rerun selection,
+func (b *rerunPlanBuilder) build() *rerunPlan {
+	// 1) Seed selection union.
+	if len(b.targetJobs) == 0 {
+		for id := range b.jobByID {
+			b.rerunIDs.Add(id)
+		}
+	} else {
+		for _, targetJob := range b.targetJobs {
+			b.addSelectionForSeed(targetJob)
+		}
+	}
+
+	// 2) Expand reusable call subtrees for caller jobs that are part of this rerun selection,
 	// except for ancestor callers (their siblings should not be rerun).
+	expandSubtreeCallers := make(container.Set[int64])
 	for id := range b.rerunIDs {
 		job := b.jobByID[id]
 		if job == nil {
 			continue
 		}
 		if job.IsReusableCall && !b.ancestorCallerIDs.Contains(job.ID) {
-			b.expandSubtreeCallers.Add(job.ID)
+			expandSubtreeCallers.Add(job.ID)
 		}
 	}
 
-	for callerID := range b.expandSubtreeCallers {
+	// 3) Expand caller subtrees.
+	for callerID := range expandSubtreeCallers {
 		b.rerunIDs.Add(callerID)
 		subtree := b.graph.collectCallerSubtreeJobs(callerID)
 		for id := range subtree {
@@ -151,9 +142,8 @@ func (b *rerunPlanBuilder) buildSubsetByTarget() *rerunPlan {
 		}
 	}
 
-	// 5) Compute initial statuses (Blocked vs Waiting) for all selected jobs and build the plan.
+	// 4) Compute initial statuses (Blocked vs Waiting) for all selected jobs and build the plan.
 	plan := &rerunPlan{rerunJobIDs: make(container.Set[int64]), shouldBlock: make(map[int64]bool)}
-	unblockedTargetJobID := util.Iif(b.targetJob.IsReusableCall, 0, b.targetJob.ID)
 
 	for id := range b.rerunIDs {
 		job := b.jobByID[id]
@@ -161,18 +151,28 @@ func (b *rerunPlanBuilder) buildSubsetByTarget() *rerunPlan {
 			continue
 		}
 
-		shouldBlock := true
-		if job.IsReusableCall && b.ancestorCallerIDs.Contains(job.ID) {
+		shouldBlock := b.shouldBlockByNeedsAndCaller(job.ID)
+
+		if b.explicitTargetJobID > 0 {
+			// "Explicit rerun" semantics: rerun the target job and its related jobs, but block everything else by default.
+			shouldBlock = true
+			if job.IsReusableCall && b.ancestorCallerIDs.Contains(job.ID) {
+				shouldBlock = b.isRunBlocked
+			} else if job.ID == b.explicitTargetJobID {
+				shouldBlock = util.Iif(job.IsReusableCall, true, b.isRunBlocked)
+			} else if b.callerSubtreeIDs.Contains(job.ID) {
+				shouldBlock = b.shouldBlockByNeedsAndCaller(job.ID)
+			}
+		} else if job.IsReusableCall && b.ancestorCallerIDs.Contains(job.ID) {
+			// Ancestor caller jobs are rerun for status propagation/downstream selection, but their sibling subtrees
+			// should not be rerun. Unblock them unless the run is blocked by concurrency.
 			shouldBlock = b.isRunBlocked
-		} else if job.ID == unblockedTargetJobID {
-			shouldBlock = b.isRunBlocked
-		} else if b.callerSubtreeIDs.Contains(job.ID) {
-			shouldBlock = b.shouldBlockByNeedsAndCaller(job.ID)
 		}
 
 		plan.rerunJobIDs.Add(job.ID)
 		plan.shouldBlock[job.ID] = shouldBlock
 	}
+
 	return plan
 }
 

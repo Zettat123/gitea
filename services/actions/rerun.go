@@ -129,41 +129,72 @@ func prepareRunRerun(ctx context.Context, repo *repo_model.Repository, run *acti
 	return run.Status == actions_model.StatusBlocked, nil
 }
 
+func validateRunRerunAllowed(ctx context.Context, repo *repo_model.Repository, run *actions_model.ActionRun) error {
+	if !run.Status.IsDone() {
+		return util.NewInvalidArgumentErrorf("this workflow run is not done")
+	}
+
+	cfgUnit := repo.MustGetUnit(ctx, unit.TypeActions)
+	cfg := cfgUnit.ActionsConfig()
+	if cfg.IsWorkflowDisabled(run.WorkflowID) {
+		return util.NewInvalidArgumentErrorf("workflow %s is disabled", run.WorkflowID)
+	}
+
+	return nil
+}
+
 // RerunWorkflowRunJobs reruns the given jobs of a workflow run.
-// jobsToRerun must include all jobs to be rerun (the target job and its transitively dependent jobs).
-// A job is blocked (waiting for dependencies) if the run itself is blocked or if any of its
-// needs are also being rerun.
-func RerunWorkflowRunJobs(ctx context.Context, repo *repo_model.Repository, run *actions_model.ActionRun, jobsToRerun []*actions_model.ActionRunJob) error {
-	if len(jobsToRerun) == 0 {
+// If targetJob is nil, it reruns the whole workflow run.
+// Otherwise, it reruns the selected job and its related jobs based on a scope-aware rerun plan.
+func RerunWorkflowRunJobs(ctx context.Context, repo *repo_model.Repository, run *actions_model.ActionRun, jobs []*actions_model.ActionRunJob, targetJob *actions_model.ActionRunJob) error {
+	if len(jobs) == 0 {
 		return nil
 	}
 
-	isRunBlocked, err := prepareRunRerun(ctx, repo, run, jobsToRerun)
+	isRunBlocked, err := prepareRunRerun(ctx, repo, run, jobs)
 	if err != nil {
 		return err
 	}
 
-	rerunJobIDs := make(container.Set[string])
-	for _, j := range jobsToRerun {
-		rerunJobIDs.Add(j.JobID)
+	var targetJobs []*actions_model.ActionRunJob
+	var explicitTargetJobID int64
+	if targetJob != nil {
+		targetJobs = []*actions_model.ActionRunJob{targetJob}
+		explicitTargetJobID = targetJob.ID
+	}
+	plan := buildRerunPlan(jobs, targetJobs, explicitTargetJobID, isRunBlocked)
+	return executeRerunPlan(ctx, jobs, plan)
+}
+
+// RerunFailedWorkflowRunJobs reruns failed/cancelled jobs and their related jobs based on a scope-aware rerun plan.
+func RerunFailedWorkflowRunJobs(ctx context.Context, repo *repo_model.Repository, run *actions_model.ActionRun, jobs []*actions_model.ActionRunJob) error {
+	if len(jobs) == 0 {
+		return nil
 	}
 
-	for _, job := range jobsToRerun {
-		shouldBlockJob := isRunBlocked
-		if !shouldBlockJob {
-			for _, need := range job.Needs {
-				if rerunJobIDs.Contains(need) {
-					shouldBlockJob = true
-					break
-				}
-			}
-		}
-		if err := rerunWorkflowJob(ctx, job, shouldBlockJob); err != nil {
-			return err
-		}
+	// If there are no failed/cancelled jobs, treat it as a no-op and do not reset the run.
+	// Still validate rerun is allowed to avoid surprising behavior differences between Web/API callers.
+	if err := validateRunRerunAllowed(ctx, repo, run); err != nil {
+		return err
 	}
 
-	return nil
+	targetJobs := make([]*actions_model.ActionRunJob, 0)
+	for _, job := range jobs {
+		if job.Status == actions_model.StatusFailure || job.Status == actions_model.StatusCancelled {
+			targetJobs = append(targetJobs, job)
+		}
+	}
+	if len(targetJobs) == 0 {
+		return nil
+	}
+
+	isRunBlocked, err := prepareRunRerun(ctx, repo, run, jobs)
+	if err != nil {
+		return err
+	}
+
+	plan := buildRerunPlan(jobs, targetJobs, 0, isRunBlocked)
+	return executeRerunPlan(ctx, jobs, plan)
 }
 
 func rerunWorkflowJob(ctx context.Context, job *actions_model.ActionRunJob, shouldBlock bool) error {

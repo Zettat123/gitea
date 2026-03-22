@@ -473,14 +473,7 @@ func Rerun(ctx *context_module.Context) {
 		return
 	}
 
-	var jobsToRerun []*actions_model.ActionRunJob
-	if currentJob != nil {
-		jobsToRerun = actions_service.GetAllRerunJobs(currentJob, jobs)
-	} else {
-		jobsToRerun = jobs
-	}
-
-	if err := actions_service.RerunWorkflowRunJobs(ctx, ctx.Repo.Repository, run, jobsToRerun); err != nil {
+	if err := actions_service.RerunWorkflowRunJobs(ctx, ctx.Repo.Repository, run, jobs, currentJob); err != nil {
 		ctx.ServerError("RerunWorkflowRunJobs", err)
 		return
 	}
@@ -498,8 +491,8 @@ func RerunFailed(ctx *context_module.Context) {
 		return
 	}
 
-	if err := actions_service.RerunWorkflowRunJobs(ctx, ctx.Repo.Repository, run, actions_service.GetFailedRerunJobs(jobs)); err != nil {
-		ctx.ServerError("RerunWorkflowRunJobs", err)
+	if err := actions_service.RerunFailedWorkflowRunJobs(ctx, ctx.Repo.Repository, run, jobs); err != nil {
+		ctx.ServerError("RerunFailedWorkflowRunJobs", err)
 		return
 	}
 
