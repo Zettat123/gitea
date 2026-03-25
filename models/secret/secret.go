@@ -153,16 +153,16 @@ func UpdateSecret(ctx context.Context, secretID int64, data, description string)
 }
 
 func GetSecretsOfTask(ctx context.Context, task *actions_model.ActionTask) (map[string]string, error) {
-	secrets := map[string]string{}
+	baseSecrets := map[string]string{}
 
-	secrets["GITHUB_TOKEN"] = task.Token
-	secrets["GITEA_TOKEN"] = task.Token
+	baseSecrets["GITHUB_TOKEN"] = task.Token
+	baseSecrets["GITEA_TOKEN"] = task.Token
 
 	if task.Job.Run.IsForkPullRequest && task.Job.Run.TriggerEvent != actions_module.GithubEventPullRequestTarget {
 		// ignore secrets for fork pull request, except GITHUB_TOKEN and GITEA_TOKEN which are automatically generated.
 		// for the tasks triggered by pull_request_target event, they could access the secrets because they will run in the context of the base branch
 		// see the documentation: https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#pull_request_target
-		return secrets, nil
+		return baseSecrets, nil
 	}
 
 	ownerSecrets, err := db.Find[Secret](ctx, FindSecretsOptions{OwnerID: task.Job.Run.Repo.OwnerID})
@@ -182,42 +182,61 @@ func GetSecretsOfTask(ctx context.Context, task *actions_model.ActionTask) (map[
 			log.Error("Unable to decrypt Actions secret %v %q, maybe SECRET_KEY is wrong: %v", secret.ID, secret.Name, err)
 			continue
 		}
-		secrets[secret.Name] = v
+		baseSecrets[secret.Name] = v
 	}
 
-	if task.Job.ParentCallJobID > 0 {
-		callerJob, err := actions_model.GetRunJobByRepoAndID(ctx, task.Job.RepoID, task.Job.ParentCallJobID)
-		if err != nil {
-			return nil, fmt.Errorf("GetRunJobByRepoAndID: %w", err)
-		}
-		if !callerJob.CallSecretsInherit {
-			// For reusable workflow child jobs, only expose explicitly mapped secrets, plus tokens.
-			filteredSecrets := map[string]string{}
-			filteredSecrets["GITHUB_TOKEN"] = secrets["GITHUB_TOKEN"]
-			filteredSecrets["GITEA_TOKEN"] = secrets["GITEA_TOKEN"]
-
-			if callerJob.CallSecretNames != "" {
-				var mapping map[string]string
-				if err := json.Unmarshal([]byte(callerJob.CallSecretNames), &mapping); err != nil {
-					return nil, fmt.Errorf("unmarshal reusable workflow call secrets mapping for caller job %d: %w", callerJob.ID, err)
-				}
-				for alias, sourceName := range mapping {
-					if v, ok := secrets[strings.ToUpper(sourceName)]; ok {
-						filteredSecrets[alias] = v
-					}
-				}
-			}
-			secrets = filteredSecrets
-		}
-	}
-
-	return secrets, nil
+	return getScopedSecretsForJob(ctx, task.Job, baseSecrets)
 }
 
 func CountWrongRepoLevelSecrets(ctx context.Context) (int64, error) {
 	var result int64
 	_, err := db.GetEngine(ctx).SQL("SELECT count(`id`) FROM `secret` WHERE `repo_id` > 0 AND `owner_id` > 0").Get(&result)
 	return result, err
+}
+
+func getScopedSecretsForJob(ctx context.Context, job *actions_model.ActionRunJob, baseSecrets map[string]string) (map[string]string, error) {
+	if job.ParentCallJobID == 0 {
+		return baseSecrets, nil
+	}
+
+	callerJob, err := actions_model.GetRunJobByRepoAndID(ctx, job.RepoID, job.ParentCallJobID)
+	if err != nil {
+		return nil, fmt.Errorf("GetRunJobByRepoAndID: %w", err)
+	}
+
+	callerSecrets, err := getScopedSecretsForJob(ctx, callerJob, baseSecrets)
+	if err != nil {
+		return nil, err
+	}
+	if callerJob.CallSecretsInherit {
+		return callerSecrets, nil
+	}
+
+	// For reusable workflow child jobs, only expose explicitly mapped secrets, plus tokens.
+	filteredSecrets := map[string]string{
+		"GITHUB_TOKEN": baseSecrets["GITHUB_TOKEN"],
+		"GITEA_TOKEN":  baseSecrets["GITEA_TOKEN"],
+	}
+
+	if callerJob.CallSecretNames == "" {
+		return filteredSecrets, nil
+	}
+
+	var mapping map[string]string
+	if err := json.Unmarshal([]byte(callerJob.CallSecretNames), &mapping); err != nil {
+		return nil, fmt.Errorf("unmarshal reusable workflow call secrets mapping for caller job %d: %w", callerJob.ID, err)
+	}
+	for alias, sourceName := range mapping {
+		if v, ok := callerSecrets[sourceName]; ok {
+			filteredSecrets[alias] = v
+			continue
+		}
+		if v, ok := callerSecrets[strings.ToUpper(sourceName)]; ok {
+			filteredSecrets[alias] = v
+		}
+	}
+
+	return filteredSecrets, nil
 }
 
 func UpdateWrongRepoLevelSecrets(ctx context.Context) (int64, error) {
