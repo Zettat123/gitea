@@ -357,9 +357,18 @@ func EvaluateWorkflowCallInputs(workflow *model.Workflow, jobID string, job *Job
 		case "string":
 			inputsWithDefaults[k] = out
 		case "boolean":
-			switch out.(type) {
+			switch v := out.(type) {
 			case bool:
-				inputsWithDefaults[k] = out
+				inputsWithDefaults[k] = v
+			case string:
+				switch v {
+				case "true":
+					inputsWithDefaults[k] = true
+				case "false":
+					inputsWithDefaults[k] = false
+				default:
+					return nil, fmt.Errorf("workflow_call input %q expects boolean (%v), got %q", k, err, v)
+				}
 			default:
 				return nil, fmt.Errorf("workflow_call input %q expects boolean", k)
 			}
