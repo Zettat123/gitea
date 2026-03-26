@@ -1637,7 +1637,7 @@ jobs:
 
 	initialRunEventsLen := len(webhookData.payloads)
 
-	time.Sleep(time.Millisecond)
+	time.Sleep(500 * time.Millisecond)
 
 	require.NoError(t, actions.StopEndlessTasks(t.Context()))
 
