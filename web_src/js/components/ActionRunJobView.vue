@@ -618,14 +618,14 @@ async function hashChangeListener() {
 .job-info-header .job-info-header-detail {
   color: var(--color-console-fg-subtle);
   font-size: 12px;
-  margin: 2px 0 0 0;
+  margin: 2px 0 0;
   word-break: break-all;
 }
 
 .job-info-header .job-info-header-status {
   color: var(--color-console-fg-subtle);
   font-size: 12px;
-  margin: 2px 0 0 0;
+  margin: 2px 0 0;
   display: inline-flex;
   align-items: center;
 }
