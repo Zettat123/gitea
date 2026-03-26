@@ -14,6 +14,7 @@ const props = defineProps<{
 }>();
 
 const {currentRun: run} = toRefs(props.store.viewData);
+const rootLevelJobs = computed(() => run.value.jobs.filter((job) => job.parentCallJobID === 0));
 
 const runTriggeredAtIso = computed(() => {
   const t = props.store.viewData.currentRun.triggeredAt;
@@ -42,10 +43,11 @@ onBeforeUnmount(() => {
       </p>
     </div>
     <WorkflowGraph
-      v-if="run.jobs.length > 0"
-      :jobs="run.jobs"
+      v-if="rootLevelJobs.length > 0"
+      :jobs="rootLevelJobs"
       :run-link="run.link"
       :workflow-id="run.workflowID"
+      :show-caller-hint="true"
       class="workflow-graph-container"
     />
   </div>

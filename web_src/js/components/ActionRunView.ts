@@ -72,23 +72,11 @@ export function buildJobsByParentCallJobID(jobs: ActionsJob[]): Map<number, Acti
   return childrenByParent;
 }
 
-export function collectCallerSubtreeJobs(jobs: ActionsJob[], callerJobID: number): ActionsJob[] {
+export function collectCallerChildJobs(jobs: ActionsJob[], callerJobID: number): ActionsJob[] {
   if (!callerJobID) return [];
 
   const childrenByParent = buildJobsByParentCallJobID(jobs);
-  const directChildren = childrenByParent.get(callerJobID) || [];
-  const result: ActionsJob[] = [];
-  const stack = Array.from(directChildren).reverse();
-
-  while (stack.length > 0) {
-    const job = stack.pop()!;
-    result.push(job);
-
-    const children = childrenByParent.get(job.id) || [];
-    for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
-  }
-
-  return result;
+  return childrenByParent.get(callerJobID) || [];
 }
 
 export function aggregateSubsetStatus(jobs: ActionsJob[]): ActionsRunStatus {

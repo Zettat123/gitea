@@ -12,6 +12,7 @@ interface JobNode {
   status: ActionsRunStatus;
   needs: string[];
   duration: string;
+  isReusableCall: boolean;
 
   index: number;
 
@@ -43,6 +44,7 @@ const props = defineProps<{
   jobs: ActionsJob[];
   runLink: string;
   workflowId: string;
+  showCallerHint?: boolean;
 }>()
 
 const settingKeyStates = 'actions-graph-states';
@@ -56,6 +58,9 @@ const dragStart = ref({ x: 0, y: 0 });
 const lastMousePos = ref({ x: 0, y: 0 });
 const graphContainer = ref<HTMLElement | null>(null);
 const hoveredJobId = ref<number | null>(null);
+const showCallerHint = computed(() => Boolean(props.showCallerHint));
+const defaultNodeHeight = 50;
+const callerHintNodeHeight = 64;
 
 function getScopedJobKey(job: ActionsJob): string {
   return `${job.parentCallJobID}:${job.jobId}`;
@@ -106,7 +111,7 @@ const graphWidth = computed(() => {
 
 const graphHeight = computed(() => {
   if (jobsWithLayout.value.length === 0) return 400;
-  const maxY = Math.max(...jobsWithLayout.value.map(j => j.y + nodeHeight));
+  const maxY = Math.max(...jobsWithLayout.value.map(j => j.y + getNodeHeight(j)));
   return maxY + margin * 2;
 });
 
@@ -148,6 +153,7 @@ const jobsWithLayout = computed<JobNode[]>(() => {
           status: job.status,
           needs: job.needs || [],
           duration: job.duration,
+          isReusableCall: job.isReusableCall,
 
           index: props.jobs.findIndex(j => j.id === job.id),
 
@@ -167,6 +173,7 @@ const jobsWithLayout = computed<JobNode[]>(() => {
       status: job.status,
       needs: job.needs || [],
       duration: job.duration,
+      isReusableCall: job.isReusableCall,
 
       index: index,
 
@@ -209,7 +216,7 @@ const bezierEdges = computed<BezierEdge[]>(() => {
     }
 
     const startX = fromNode.x + nodeWidth.value / 2;
-    const startY = fromNode.y + nodeHeight;
+    const startY = fromNode.y + getNodeHeight(fromNode);
     const endX = toNode.x + nodeWidth.value / 2;
     const endY = toNode.y;
 
@@ -250,7 +257,6 @@ const graphMetrics = computed(() => {
   };
 })
 
-const nodeHeight = 50;
 const verticalSpacing = 120;
 const margin = 40;
 
@@ -405,6 +411,15 @@ function getDisplayName(name: string): string {
   }
 
   return name.substring(0, maxChars - 3) + '...';
+}
+
+function getHintText(job: JobNode): string {
+  if (!showCallerHint.value || !job.isReusableCall) return '';
+  return 'click to view child jobs';
+}
+
+function getNodeHeight(job: Pick<JobNode, 'isReusableCall'>): number {
+  return showCallerHint.value && job.isReusableCall ? callerHintNodeHeight : defaultNodeHeight;
 }
 
 function formatStatus(status: ActionsRunStatus): string {
@@ -652,7 +667,7 @@ function onNodeClick(job: JobNode, event: MouseEvent) {
             :x="job.x"
             :y="job.y"
             :width="nodeWidth"
-            :height="nodeHeight"
+            :height="getNodeHeight(job)"
             rx="8"
             :fill="getNodeColor(job.status)"
             stroke="var(--color-card-border)"
@@ -665,7 +680,7 @@ function onNodeClick(job: JobNode, event: MouseEvent) {
             :x="job.x"
             :y="job.y"
             :width="nodeWidth"
-            :height="nodeHeight"
+            :height="getNodeHeight(job)"
             rx="8"
             fill="url(#running-gradient)"
             opacity="0.3"
@@ -683,9 +698,21 @@ function onNodeClick(job: JobNode, event: MouseEvent) {
           </text>
 
           <text
+            v-if="showCallerHint && job.isReusableCall"
+            :x="job.x + 8"
+            :y="job.y + 31"
+            fill="rgba(255,255,255,0.72)"
+            font-size="9"
+            text-anchor="start"
+            class="job-hint"
+          >
+            {{ getHintText(job) }}
+          </text>
+
+          <text
             v-if="job.duration || (job.status === 'success' || job.status === 'failure')"
             :x="job.x + nodeWidth - 10"
-            :y="job.y + nodeHeight - 25"
+            :y="job.y + getNodeHeight(job) - 25"
             fill="rgba(255,255,255,0.7)"
             font-size="9"
             text-anchor="end"
@@ -696,7 +723,7 @@ function onNodeClick(job: JobNode, event: MouseEvent) {
 
           <text
             :x="job.x + nodeWidth - 10"
-            :y="job.y + nodeHeight - 8"
+            :y="job.y + getNodeHeight(job) - 8"
             fill="rgba(255,255,255,0.9)"
             font-size="10"
             text-anchor="end"
@@ -708,7 +735,7 @@ function onNodeClick(job: JobNode, event: MouseEvent) {
           <rect
             v-if="job.status === 'running'"
             :x="job.x + 2"
-            :y="job.y + nodeHeight - 6"
+            :y="job.y + getNodeHeight(job) - 6"
             :width="(nodeWidth - 4) * 0.5"
             height="4"
             rx="2"

@@ -13,7 +13,7 @@ import type {ActionsArtifact, ActionsJob, ActionsRun, ActionsRunStatus} from '..
 import {
   type ActionRunViewStore,
   aggregateSubsetStatus,
-  collectCallerSubtreeJobs,
+  collectCallerChildJobs,
   createLogLineMessage,
   type LogLine,
   type LogLineCommand,
@@ -121,11 +121,11 @@ const jobStepLogs = ref<Array<StepContainerElement | undefined>>([]);
 
 const selectedJob = computed(() => run.value.jobs.find((it) => it.id === props.jobId));
 const isReusableCallerJob = computed(() => Boolean(selectedJob.value?.isReusableCall));
-const callerSubtreeJobs = computed<ActionsJob[]>(() => {
+const callerChildJobs = computed<ActionsJob[]>(() => {
   if (!isReusableCallerJob.value) return [];
-  return collectCallerSubtreeJobs(run.value.jobs || [], props.jobId);
+  return collectCallerChildJobs(run.value.jobs || [], props.jobId);
 });
-const callerSummaryStatus = computed<ActionsRunStatus>(() => aggregateSubsetStatus(callerSubtreeJobs.value));
+const callerSummaryStatus = computed<ActionsRunStatus>(() => aggregateSubsetStatus(callerChildJobs.value));
 const callerSummaryDuration = computed(() => selectedJob.value?.duration || '');
 
 watch(optionAlwaysAutoScroll, () => {
@@ -442,9 +442,10 @@ async function hashChangeListener() {
     </div>
     <div class="caller-summary-container">
       <WorkflowGraph
-        :jobs="callerSubtreeJobs"
+        :jobs="callerChildJobs"
         :run-link="run.link"
         :workflow-id="`${run.workflowID}:${jobId}`"
+        :show-caller-hint="true"
       />
     </div>
   </template>
