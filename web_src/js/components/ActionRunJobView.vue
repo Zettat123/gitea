@@ -1,16 +1,19 @@
 <script setup lang="ts">
-import {nextTick, onBeforeUnmount, onMounted, ref, toRefs, watch} from 'vue';
+import {computed, nextTick, onBeforeUnmount, onMounted, ref, toRefs, watch} from 'vue';
 import {SvgIcon} from '../svg.ts';
 import ActionRunStatus from './ActionRunStatus.vue';
+import WorkflowGraph from './WorkflowGraph.vue';
 import {addDelegatedEventListener, createElementFromAttrs, toggleElem} from '../utils/dom.ts';
 import {formatDatetime} from '../utils/time.ts';
 import {POST} from '../modules/fetch.ts';
 import type {IntervalId} from '../types.ts';
 import {toggleFullScreen} from '../utils.ts';
 import {localUserSettings} from '../modules/user-settings.ts';
-import type {ActionsArtifact, ActionsRun, ActionsRunStatus} from '../modules/gitea-actions.ts';
+import type {ActionsArtifact, ActionsJob, ActionsRun, ActionsRunStatus} from '../modules/gitea-actions.ts';
 import {
   type ActionRunViewStore,
+  aggregateSubsetStatus,
+  collectCallerSubtreeJobs,
   createLogLineMessage,
   type LogLine,
   type LogLineCommand,
@@ -116,6 +119,15 @@ const currentJob = ref<CurrentJob>({
 const stepsContainer = ref<HTMLElement | null>(null);
 const jobStepLogs = ref<Array<StepContainerElement | undefined>>([]);
 
+const selectedJob = computed(() => run.value.jobs.find((it) => it.id === props.jobId));
+const isReusableCallerJob = computed(() => Boolean(selectedJob.value?.isReusableCall));
+const callerSubtreeJobs = computed<ActionsJob[]>(() => {
+  if (!isReusableCallerJob.value) return [];
+  return collectCallerSubtreeJobs(run.value.jobs || [], props.jobId);
+});
+const callerSummaryStatus = computed<ActionsRunStatus>(() => aggregateSubsetStatus(callerSubtreeJobs.value));
+const callerSummaryDuration = computed(() => selectedJob.value?.duration || '');
+
 watch(optionAlwaysAutoScroll, () => {
   saveLocaleStorageOptions();
 });
@@ -129,27 +141,32 @@ onMounted(async () => {
   // need to await first loadJob so this.currentJobStepsStates is initialized and can be used in hashChangeListener
   await loadJob();
 
-  // auto-scroll to the bottom of the log group when it is opened
-  // "toggle" event doesn't bubble, so we need to use 'click' event delegation to handle it
-  addDelegatedEventListener(elStepsContainer(), 'click', 'summary.job-log-group-summary', (el, _) => {
-    if (!optionAlwaysAutoScroll.value) return;
-    const elJobLogGroup = el.closest('details.job-log-group') as HTMLDetailsElement;
-    setTimeout(() => {
-      if (elJobLogGroup.open && !isLogElementInViewport(elJobLogGroup)) {
-        elJobLogGroup.scrollIntoView({behavior: 'smooth', block: 'end'});
-      }
-    }, 0);
-  });
-
   intervalID = setInterval(() => void loadJob(), 1000);
   document.body.addEventListener('click', closeDropdown);
-  void hashChangeListener();
-  window.addEventListener('hashchange', hashChangeListener);
+
+  if (!isReusableCallerJob.value) {
+    // auto-scroll to the bottom of the log group when it is opened
+    // "toggle" event doesn't bubble, so we need to use 'click' event delegation to handle it
+    addDelegatedEventListener(elStepsContainer(), 'click', 'summary.job-log-group-summary', (el, _) => {
+      if (!optionAlwaysAutoScroll.value) return;
+      const elJobLogGroup = el.closest('details.job-log-group') as HTMLDetailsElement;
+      setTimeout(() => {
+        if (elJobLogGroup.open && !isLogElementInViewport(elJobLogGroup)) {
+          elJobLogGroup.scrollIntoView({behavior: 'smooth', block: 'end'});
+        }
+      }, 0);
+    });
+
+    void hashChangeListener();
+    window.addEventListener('hashchange', hashChangeListener);
+  }
 });
 
 onBeforeUnmount(() => {
   document.body.removeEventListener('click', closeDropdown);
-  window.removeEventListener('hashchange', hashChangeListener);
+  if (!isReusableCallerJob.value) {
+    window.removeEventListener('hashchange', hashChangeListener);
+  }
   // clear the interval timer when the component is unmounted
   // even our page is rendered once, not spa style
   if (intervalID) {
@@ -402,81 +419,112 @@ async function hashChangeListener() {
 }
 </script>
 <template>
-  <div class="job-info-header">
-    <div class="job-info-header-left gt-ellipsis">
-      <h3 class="job-info-header-title gt-ellipsis">
-        {{ currentJob.title }}
-      </h3>
-      <p class="job-info-header-detail">
-        {{ currentJob.detail }}
-      </p>
+  <template v-if="isReusableCallerJob">
+    <div class="job-info-header job-info-header-caller">
+      <div class="job-info-header-left gt-ellipsis">
+        <div class="job-info-header-title-row">
+          <h3 class="job-info-header-title gt-ellipsis">
+            {{ currentJob.title }}
+          </h3>
+          <span v-if="selectedJob?.reusableWorkflowUses" class="job-info-header-uses-badge gt-ellipsis">
+            <span class="job-info-header-uses-prefix">uses:</span>
+            {{ selectedJob.reusableWorkflowUses }}
+          </span>
+        </div>
+        <p class="job-info-header-status">
+          <ActionRunStatus :status="callerSummaryStatus" class="tw-mr-1"/>
+          {{ locale.status[callerSummaryStatus] }}
+        </p>
+      </div>
+      <div class="job-info-header-right">
+        <span class="step-summary-duration">{{ callerSummaryDuration }}</span>
+      </div>
     </div>
-    <div class="job-info-header-right">
-      <div class="ui top right pointing dropdown custom jump item" @click.stop="menuVisible = !menuVisible" @keyup.enter="menuVisible = !menuVisible">
-        <button class="ui button tw-px-3">
-          <SvgIcon name="octicon-gear" :size="18"/>
-        </button>
-        <div class="menu transition action-job-menu" :class="{visible: menuVisible}" v-if="menuVisible" v-cloak>
-          <a class="item" @click="toggleTimeDisplay('seconds')">
-            <i class="icon"><SvgIcon :name="timeVisible['log-time-seconds'] ? 'octicon-check' : 'gitea-empty-checkbox'"/></i>
-            {{ locale.showLogSeconds }}
-          </a>
-          <a class="item" @click="toggleTimeDisplay('stamp')">
-            <i class="icon"><SvgIcon :name="timeVisible['log-time-stamp'] ? 'octicon-check' : 'gitea-empty-checkbox'"/></i>
-            {{ locale.showTimeStamps }}
-          </a>
-          <a class="item" @click="toggleFullScreenMode()">
-            <i class="icon"><SvgIcon :name="isFullScreen ? 'octicon-check' : 'gitea-empty-checkbox'"/></i>
-            {{ locale.showFullScreen }}
-          </a>
-          <div class="divider"/>
-          <a class="item" @click="optionAlwaysAutoScroll = !optionAlwaysAutoScroll">
-            <i class="icon"><SvgIcon :name="optionAlwaysAutoScroll ? 'octicon-check' : 'gitea-empty-checkbox'"/></i>
-            {{ locale.logsAlwaysAutoScroll }}
-          </a>
-          <a class="item" @click="optionAlwaysExpandRunning = !optionAlwaysExpandRunning">
-            <i class="icon"><SvgIcon :name="optionAlwaysExpandRunning ? 'octicon-check' : 'gitea-empty-checkbox'"/></i>
-            {{ locale.logsAlwaysExpandRunning }}
-          </a>
-          <div class="divider"/>
-          <a :class="['item', !currentJob.steps.length ? 'disabled' : '']" :href="run.link + '/jobs/' + jobId + '/logs'" download>
-            <i class="icon"><SvgIcon name="octicon-download"/></i>
-            {{ locale.downloadLogs }}
-          </a>
+    <div class="caller-summary-container">
+      <WorkflowGraph
+        :jobs="callerSubtreeJobs"
+        :run-link="run.link"
+        :workflow-id="`${run.workflowID}:${jobId}`"
+      />
+    </div>
+  </template>
+  <template v-else>
+    <div class="job-info-header">
+      <div class="job-info-header-left gt-ellipsis">
+        <h3 class="job-info-header-title gt-ellipsis">
+          {{ currentJob.title }}
+        </h3>
+        <p class="job-info-header-detail">
+          {{ currentJob.detail }}
+        </p>
+      </div>
+      <div class="job-info-header-right">
+        <div class="ui top right pointing dropdown custom jump item" @click.stop="menuVisible = !menuVisible" @keyup.enter="menuVisible = !menuVisible">
+          <button class="ui button tw-px-3">
+            <SvgIcon name="octicon-gear" :size="18"/>
+          </button>
+          <div class="menu transition action-job-menu" :class="{visible: menuVisible}" v-if="menuVisible" v-cloak>
+            <a class="item" @click="toggleTimeDisplay('seconds')">
+              <i class="icon"><SvgIcon :name="timeVisible['log-time-seconds'] ? 'octicon-check' : 'gitea-empty-checkbox'"/></i>
+              {{ locale.showLogSeconds }}
+            </a>
+            <a class="item" @click="toggleTimeDisplay('stamp')">
+              <i class="icon"><SvgIcon :name="timeVisible['log-time-stamp'] ? 'octicon-check' : 'gitea-empty-checkbox'"/></i>
+              {{ locale.showTimeStamps }}
+            </a>
+            <a class="item" @click="toggleFullScreenMode()">
+              <i class="icon"><SvgIcon :name="isFullScreen ? 'octicon-check' : 'gitea-empty-checkbox'"/></i>
+              {{ locale.showFullScreen }}
+            </a>
+            <div class="divider"/>
+            <a class="item" @click="optionAlwaysAutoScroll = !optionAlwaysAutoScroll">
+              <i class="icon"><SvgIcon :name="optionAlwaysAutoScroll ? 'octicon-check' : 'gitea-empty-checkbox'"/></i>
+              {{ locale.logsAlwaysAutoScroll }}
+            </a>
+            <a class="item" @click="optionAlwaysExpandRunning = !optionAlwaysExpandRunning">
+              <i class="icon"><SvgIcon :name="optionAlwaysExpandRunning ? 'octicon-check' : 'gitea-empty-checkbox'"/></i>
+              {{ locale.logsAlwaysExpandRunning }}
+            </a>
+            <div class="divider"/>
+            <a :class="['item', !currentJob.steps.length ? 'disabled' : '']" :href="run.link + '/jobs/' + jobId + '/logs'" download>
+              <i class="icon"><SvgIcon name="octicon-download"/></i>
+              {{ locale.downloadLogs }}
+            </a>
+          </div>
         </div>
       </div>
     </div>
-  </div>
-  <!-- always create the node because we have our own event listeners on it, don't use "v-if" -->
-  <div class="job-step-container" ref="stepsContainer" v-show="currentJob.steps.length">
-    <div class="job-step-section" v-for="(jobStep, stepIdx) in currentJob.steps" :key="stepIdx">
-      <div
-        class="job-step-summary"
-        @click.stop="isExpandable(jobStep.status) && toggleStepLogs(stepIdx)"
-        :class="[currentJobStepsStates[stepIdx].expanded ? 'selected' : '', isExpandable(jobStep.status) && 'step-expandable']"
-      >
-        <!-- If the job is done and the job step log is loaded for the first time, show the loading icon
-            currentJobStepsStates[i].cursor === null means the log is loaded for the first time
-          -->
-        <SvgIcon
-          v-if="isDone(run.status) && currentJobStepsStates[stepIdx].expanded && currentJobStepsStates[stepIdx].cursor === null"
-          name="gitea-running"
-          class="tw-mr-2 rotate-clockwise"
-        />
-        <SvgIcon
-          v-else
-          :name="currentJobStepsStates[stepIdx].expanded ? 'octicon-chevron-down' : 'octicon-chevron-right'"
-          :class="['tw-mr-2', !isExpandable(jobStep.status) && 'tw-invisible']"
-        />
-        <ActionRunStatus :status="jobStep.status" class="tw-mr-2"/>
-        <span class="step-summary-msg gt-ellipsis">{{ jobStep.summary }}</span>
-        <span class="step-summary-duration">{{ jobStep.duration }}</span>
+    <!-- always create the node because we have our own event listeners on it, don't use "v-if" -->
+    <div class="job-step-container" ref="stepsContainer" v-show="currentJob.steps.length">
+      <div class="job-step-section" v-for="(jobStep, stepIdx) in currentJob.steps" :key="stepIdx">
+        <div
+          class="job-step-summary"
+          @click.stop="isExpandable(jobStep.status) && toggleStepLogs(stepIdx)"
+          :class="[currentJobStepsStates[stepIdx].expanded ? 'selected' : '', isExpandable(jobStep.status) && 'step-expandable']"
+        >
+          <!-- If the job is done and the job step log is loaded for the first time, show the loading icon
+              currentJobStepsStates[i].cursor === null means the log is loaded for the first time
+            -->
+          <SvgIcon
+            v-if="isDone(run.status) && currentJobStepsStates[stepIdx].expanded && currentJobStepsStates[stepIdx].cursor === null"
+            name="gitea-running"
+            class="tw-mr-2 rotate-clockwise"
+          />
+          <SvgIcon
+            v-else
+            :name="currentJobStepsStates[stepIdx].expanded ? 'octicon-chevron-down' : 'octicon-chevron-right'"
+            :class="['tw-mr-2', !isExpandable(jobStep.status) && 'tw-invisible']"
+          />
+          <ActionRunStatus :status="jobStep.status" class="tw-mr-2"/>
+          <span class="step-summary-msg gt-ellipsis">{{ jobStep.summary }}</span>
+          <span class="step-summary-duration">{{ jobStep.duration }}</span>
+        </div>
+        <!-- the log elements could be a lot, do not use v-if to destroy/reconstruct the DOM,
+          use native DOM elements for "log line" to improve performance, Vue is not suitable for managing so many reactive elements. -->
+        <div class="job-step-logs" :ref="(el) => jobStepLogs[stepIdx] = el as StepContainerElement" v-show="currentJobStepsStates[stepIdx].expanded"/>
       </div>
-      <!-- the log elements could be a lot, do not use v-if to destroy/reconstruct the DOM,
-        use native DOM elements for "log line" to improve performance, Vue is not suitable for managing so many reactive elements. -->
-      <div class="job-step-logs" :ref="(el) => jobStepLogs[stepIdx] = el as StepContainerElement" v-show="currentJobStepsStates[stepIdx].expanded"/>
     </div>
-  </div>
+  </template>
 </template>
 <style scoped>
 /* begin fomantic dropdown menu overrides */
@@ -524,6 +572,14 @@ async function hashChangeListener() {
   border-radius: 3px;
 }
 
+.job-info-header.job-info-header-caller {
+  align-items: flex-start;
+  min-height: 64px;
+  height: auto;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
 .job-info-header:has(+ .job-step-container) {
   border-radius: var(--border-radius) var(--border-radius) 0 0;
 }
@@ -534,13 +590,48 @@ async function hashChangeListener() {
   margin: 0;
 }
 
+.job-info-header-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.job-info-header .job-info-header-uses-badge {
+  color: var(--color-text-light-1);
+  background: var(--color-label-bg);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.2;
+  padding: 3px 8px;
+  flex-shrink: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.job-info-header .job-info-header-uses-prefix {
+  margin-right: 4px;
+}
+
 .job-info-header .job-info-header-detail {
   color: var(--color-console-fg-subtle);
   font-size: 12px;
+  margin: 2px 0 0 0;
+  word-break: break-all;
+}
+
+.job-info-header .job-info-header-status {
+  color: var(--color-console-fg-subtle);
+  font-size: 12px;
+  margin: 2px 0 0 0;
+  display: inline-flex;
+  align-items: center;
 }
 
 .job-info-header-left {
   flex: 1;
+  min-width: 0;
 }
 
 .job-step-container {
@@ -559,6 +650,12 @@ async function hashChangeListener() {
 
 .job-step-container .job-step-summary.step-expandable {
   cursor: pointer;
+}
+
+.caller-summary-container {
+  border-radius: 0 0 var(--border-radius) var(--border-radius);
+  border-top: 1px solid var(--color-console-border);
+  overflow: hidden;
 }
 
 .job-step-container .job-step-summary.step-expandable:hover {

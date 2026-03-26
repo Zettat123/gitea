@@ -168,6 +168,12 @@ type ViewJob struct {
 	CanRerun bool     `json:"canRerun"`
 	Duration string   `json:"duration"`
 	Needs    []string `json:"needs,omitempty"`
+
+	IsReusableCall       bool   `json:"isReusableCall"`
+	ReusableWorkflowUses string `json:"reusableWorkflowUses,omitempty"`
+	ParentCallJobID      int64  `json:"parentCallJobID"`
+	RootCallJobID        int64  `json:"rootCallJobID"`
+	CallDepth            int    `json:"callDepth"`
 }
 
 type ViewCommit struct {
@@ -283,6 +289,12 @@ func fillViewRunResponseSummary(ctx *context_module.Context, resp *ViewResponse,
 			CanRerun: resp.State.Run.CanRerun,
 			Duration: v.Duration().String(),
 			Needs:    v.Needs,
+
+			IsReusableCall:       v.IsReusableCall,
+			ReusableWorkflowUses: v.ReusableWorkflowUses,
+			ParentCallJobID:      v.ParentCallJobID,
+			RootCallJobID:        v.RootCallJobID,
+			CallDepth:            v.CallDepth,
 		})
 	}
 

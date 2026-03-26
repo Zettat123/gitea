@@ -7,6 +7,7 @@ import type {ActionsJob, ActionsRunStatus} from '../modules/gitea-actions.ts';
 
 interface JobNode {
   id: number;
+  parentCallJobID: number;
   name: string;
   status: ActionsRunStatus;
   needs: string[];
@@ -20,8 +21,8 @@ interface JobNode {
 }
 
 interface Edge {
-  from: string;
-  to: string;
+  from: number;
+  to: number;
   key: string;
 }
 
@@ -55,6 +56,10 @@ const dragStart = ref({ x: 0, y: 0 });
 const lastMousePos = ref({ x: 0, y: 0 });
 const graphContainer = ref<HTMLElement | null>(null);
 const hoveredJobId = ref<number | null>(null);
+
+function getScopedJobKey(job: ActionsJob): string {
+  return `${job.parentCallJobID}:${job.jobId}`;
+}
 
 const loadSavedState = () => {
   const allStates = localUserSettings.getJsonObject<Record<string, StoredState>>(settingKeyStates, {});
@@ -114,7 +119,7 @@ const jobsWithLayout = computed<JobNode[]>(() => {
     let maxJobsPerLevel = 0;
 
     props.jobs.forEach(job => {
-      const level = levels.get(job.name) || levels.get(job.jobId) || 0;
+      const level = levels.get(getScopedJobKey(job)) || 0;
 
       if (!jobsByLevel[level]) {
         jobsByLevel[level] = [];
@@ -138,6 +143,7 @@ const jobsWithLayout = computed<JobNode[]>(() => {
       levelJobs.forEach((job, jobIndex) => {
         result.push({
           id: job.id,
+          parentCallJobID: job.parentCallJobID,
           name: job.name,
           status: job.status,
           needs: job.needs || [],
@@ -156,6 +162,7 @@ const jobsWithLayout = computed<JobNode[]>(() => {
   } catch (error) {
     return props.jobs.map((job, index) => ({
       id: job.id,
+      parentCallJobID: job.parentCallJobID,
       name: job.name,
       status: job.status,
       needs: job.needs || [],
@@ -172,25 +179,18 @@ const jobsWithLayout = computed<JobNode[]>(() => {
 
 const edges = computed<Edge[]>(() => {
   const edgesList: Edge[] = [];
-
-  const jobsByJobId = new Map<string, ActionsJob[]>();
-  for (const job of props.jobs) {
-    if (!jobsByJobId.has(job.jobId)) {
-      jobsByJobId.set(job.jobId, []);
-    }
-    jobsByJobId.get(job.jobId)!.push(job);
-  }
+  const jobsByScopedJobID = new Map<string, ActionsJob>();
+  for (const job of props.jobs) jobsByScopedJobID.set(getScopedJobKey(job), job);
 
   for (const job of props.jobs) {
     for (const need of job.needs || []) {
-      const targetJobs = jobsByJobId.get(need) || [];
-      for (const targetJob of targetJobs) {
-        edgesList.push({
-          from: targetJob.name,
-          to: job.name,
-          key: `${targetJob.id}-${job.id}`,
-        });
-      }
+      const targetJob = jobsByScopedJobID.get(`${job.parentCallJobID}:${need}`);
+      if (!targetJob) continue;
+      edgesList.push({
+        from: targetJob.id,
+        to: job.id,
+        key: `${targetJob.id}-${job.id}`,
+      });
     }
   }
 
@@ -201,8 +201,8 @@ const bezierEdges = computed<BezierEdge[]>(() => {
   const bezierEdgesList: BezierEdge[] = [];
 
   edges.value.forEach(edge => {
-    const fromNode = jobsWithLayout.value.find(j => j.name === edge.from);
-    const toNode = jobsWithLayout.value.find(j => j.name === edge.to);
+    const fromNode = jobsWithLayout.value.find(j => j.id === edge.from);
+    const toNode = jobsWithLayout.value.find(j => j.id === edge.to);
 
     if (!fromNode || !toNode) {
       return;
@@ -332,7 +332,7 @@ function isEdgeHighlighted(edge: BezierEdge): boolean {
     return false;
   }
 
-  return edge.from === hoveredJob.name || edge.to === hoveredJob.name;
+  return edge.from === hoveredJob.id || edge.to === hoveredJob.id;
 }
 
 function getNodeColor(status: ActionsRunStatus): string {
@@ -517,8 +517,7 @@ function getEdgeClass(edge: BezierEdge): string {
 function computeJobLevels(jobs: ActionsJob[]): Map<string, number> {
   const jobMap = new Map<string, ActionsJob>()
   jobs.forEach(job => {
-    jobMap.set(job.name, job);
-    if (job.jobId) jobMap.set(job.jobId, job);
+    jobMap.set(getScopedJobKey(job), job);
   });
 
   const levels = new Map<string, number>();
@@ -526,59 +525,56 @@ function computeJobLevels(jobs: ActionsJob[]): Map<string, number> {
   const recursionStack = new Set<string>();
   const MAX_DEPTH = 100;
 
-  function dfs(jobNameOrId: string, depth: number = 0): number {
+  function dfs(jobKey: string, depth: number = 0): number {
     if (depth > MAX_DEPTH) {
-      console.error(`Max recursion depth (${MAX_DEPTH}) reached for: ${jobNameOrId}`);
+      console.error(`Max recursion depth (${MAX_DEPTH}) reached for: ${jobKey}`);
       return 0;
     }
 
-    if (recursionStack.has(jobNameOrId)) {
-      console.error(`Cycle detected involving: ${jobNameOrId}`);
+    if (recursionStack.has(jobKey)) {
+      console.error(`Cycle detected involving: ${jobKey}`);
       return 0;
     }
 
-    if (visited.has(jobNameOrId)) {
-      return levels.get(jobNameOrId) || 0;
+    if (visited.has(jobKey)) {
+      return levels.get(jobKey) || 0;
     }
 
-    recursionStack.add(jobNameOrId);
-    visited.add(jobNameOrId);
+    recursionStack.add(jobKey);
+    visited.add(jobKey);
 
-    const job = jobMap.get(jobNameOrId);
+    const job = jobMap.get(jobKey);
     if (!job) {
-      recursionStack.delete(jobNameOrId);
+      recursionStack.delete(jobKey);
       return 0;
     }
 
     if (!job.needs?.length) {
-      levels.set(job.jobId, 0);
-      recursionStack.delete(jobNameOrId);
+      levels.set(jobKey, 0);
+      recursionStack.delete(jobKey);
       return 0;
     }
 
     let maxLevel = -1;
     for (const need of job.needs) {
-      const needJob = jobMap.get(need);
+      const needKey = `${job.parentCallJobID}:${need}`;
+      const needJob = jobMap.get(needKey);
       if (!needJob) continue;
 
-      const needLevel = dfs(need, depth + 1);
+      const needLevel = dfs(needKey, depth + 1);
       maxLevel = Math.max(maxLevel, needLevel);
     }
 
     const level = maxLevel + 1
-    levels.set(job.name, level);
-    if (job.jobId && job.jobId !== job.name) {
-      levels.set(job.jobId, level);
-    }
+    levels.set(jobKey, level);
 
-    recursionStack.delete(jobNameOrId);
+    recursionStack.delete(jobKey);
     return level;
   }
 
   jobs.forEach(job => {
-    if (!visited.has(job.name) && !visited.has(job.jobId)) {
-      dfs(job.name);
-    }
+    const key = getScopedJobKey(job);
+    if (!visited.has(key)) dfs(key);
   })
 
   return levels;
