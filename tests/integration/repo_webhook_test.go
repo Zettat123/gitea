@@ -1582,7 +1582,7 @@ jobs:
 }
 
 func testWorkflowRunOnStoppingEndlessTasksForMultipleRuns(t *testing.T, webhookData *workflowRunWebhook) {
-	defer test.MockVariableValue(&setting.Actions.EndlessTaskTimeout, time.Nanosecond)()
+	defer test.MockVariableValue(&setting.Actions.EndlessTaskTimeout, time.Second)()
 
 	user2 := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2})
 	session := loginUser(t, "user2")
@@ -1637,7 +1637,7 @@ jobs:
 
 	initialRunEventsLen := len(webhookData.payloads)
 
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(2 * time.Second)
 
 	require.NoError(t, actions.StopEndlessTasks(t.Context()))
 
