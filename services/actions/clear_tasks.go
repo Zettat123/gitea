@@ -50,6 +50,10 @@ func notifyWorkflowJobStatusUpdate(ctx context.Context, jobs []*actions_model.Ac
 		CreateCommitStatusForRunJobs(ctx, job.Run, job)
 		notify_service.WorkflowJobStatusUpdate(ctx, job.Run.Repo, job.Run.TriggerUser, job, nil)
 		if _, ok := runs[job.RunID]; !ok {
+			if err := job.Run.LoadAttributes(ctx); err != nil {
+				log.Error("Failed to load run attributes: %v", err)
+				continue
+			}
 			runs[job.RunID] = job.Run
 		}
 	}
