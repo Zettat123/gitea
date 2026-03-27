@@ -36,14 +36,27 @@ func StopEndlessTasks(ctx context.Context) error {
 }
 
 func notifyWorkflowJobStatusUpdate(ctx context.Context, jobs []*actions_model.ActionRunJob) {
-	if len(jobs) > 0 {
-		CreateCommitStatus(ctx, jobs...)
-		for _, job := range jobs {
-			_ = job.LoadAttributes(ctx)
-			notify_service.WorkflowJobStatusUpdate(ctx, job.Run.Repo, job.Run.TriggerUser, job, nil)
+	if len(jobs) == 0 {
+		return
+	}
+
+	CreateCommitStatus(ctx, jobs...)
+
+	runs := make(map[int64]*actions_model.ActionRun, len(jobs))
+	for _, job := range jobs {
+		if err := job.LoadAttributes(ctx); err != nil {
+			log.Error("Failed to load job attributes: %v", err)
+			continue
 		}
-		job := jobs[0]
-		notify_service.WorkflowRunStatusUpdate(ctx, job.Run.Repo, job.Run.TriggerUser, job.Run)
+
+		notify_service.WorkflowJobStatusUpdate(ctx, job.Run.Repo, job.Run.TriggerUser, job, nil)
+		if _, ok := runs[job.RunID]; !ok {
+			runs[job.RunID] = job.Run
+		}
+	}
+
+	for _, run := range runs {
+		notify_service.WorkflowRunStatusUpdate(ctx, run.Repo, run.TriggerUser, run)
 	}
 }
 
