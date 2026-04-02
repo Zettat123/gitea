@@ -391,10 +391,8 @@ func getActionWorkflowEntry(ctx context.Context, repo *repo_model.Repository, co
 	cfgUnit := repo.MustGetUnit(ctx, unit.TypeActions)
 	cfg := cfgUnit.ActionsConfig()
 
-	defaultBranch, _ := commit.GetBranchName()
-
 	workflowURL := fmt.Sprintf("%s/actions/workflows/%s", repo.APIURL(), util.PathEscapeSegments(entry.Name()))
-	workflowRepoURL := fmt.Sprintf("%s/src/branch/%s/%s/%s", repo.HTMLURL(ctx), util.PathEscapeSegments(defaultBranch), util.PathEscapeSegments(folder), util.PathEscapeSegments(entry.Name()))
+	workflowRepoURL := fmt.Sprintf("%s/src/branch/%s/%s/%s", repo.HTMLURL(ctx), util.PathEscapeSegments(repo.DefaultBranch), util.PathEscapeSegments(folder), util.PathEscapeSegments(entry.Name()))
 	badgeURL := fmt.Sprintf("%s/actions/workflows/%s/badge.svg?branch=%s", repo.HTMLURL(ctx), util.PathEscapeSegments(entry.Name()), url.QueryEscape(repo.DefaultBranch))
 
 	// See https://docs.github.com/en/rest/actions/workflows?apiVersion=2022-11-28#get-a-workflow
@@ -466,14 +464,19 @@ func ListActionWorkflows(ctx context.Context, gitrepo *git.Repository, repo *rep
 }
 
 func GetActionWorkflow(ctx context.Context, gitrepo *git.Repository, repo *repo_model.Repository, workflowID string) (*api.ActionWorkflow, error) {
-	entries, err := ListActionWorkflows(ctx, gitrepo, repo)
+	defaultBranchCommit, err := gitrepo.GetBranchCommit(repo.DefaultBranch)
+	if err != nil {
+		return nil, err
+	}
+
+	folder, entries, err := actions.ListWorkflows(defaultBranchCommit)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, entry := range entries {
-		if entry.ID == workflowID {
-			return entry, nil
+		if entry.Name() == workflowID {
+			return getActionWorkflowEntry(ctx, repo, defaultBranchCommit, folder, entry), nil
 		}
 	}
 
