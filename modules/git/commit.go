@@ -347,27 +347,6 @@ func (c *Commit) GetFileContent(filename string, limit int) (string, error) {
 	return string(bytes), nil
 }
 
-// GetBranchName gets the closest branch name (as returned by 'git name-rev --name-only')
-func (c *Commit) GetBranchName() (string, error) {
-	cmd := gitcmd.NewCommand("name-rev")
-	if DefaultFeatures().CheckVersionAtLeast("2.13.0") {
-		cmd.AddArguments("--exclude", "refs/tags/*")
-	}
-	cmd.AddArguments("--name-only", "--no-undefined").AddDynamicArguments(c.ID.String())
-	data, _, err := cmd.RunStdString(c.repo.Ctx, &gitcmd.RunOpts{Dir: c.repo.Path})
-	if err != nil {
-		// handle special case where git can not describe commit
-		if strings.Contains(err.Error(), "cannot describe") {
-			return "", nil
-		}
-
-		return "", err
-	}
-
-	// name-rev commitID output will be "master" or "master~12"
-	return strings.SplitN(strings.TrimSpace(data), "~", 2)[0], nil
-}
-
 // CommitFileStatus represents status of files in a commit.
 type CommitFileStatus struct {
 	Added    []string
