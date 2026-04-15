@@ -46,12 +46,12 @@ func (o *OpenIDProvider) CreateGothProvider(providerName, callbackURL string, so
 	provider, err := openidConnect.New(source.ClientID, source.ClientSecret, callbackURL, source.OpenIDConnectAutoDiscoveryURL, scopes...)
 	if err != nil {
 		log.Warn("Failed to create OpenID Connect Provider with name '%s' with url '%s': %v", providerName, source.OpenIDConnectAutoDiscoveryURL, err)
-		return provider, err
+		return nil, err
 	}
 	if source.ExternalIDClaim != "" {
 		provider.UserIdClaims = []string{source.ExternalIDClaim}
 	}
-	return provider, err
+	return provider, nil
 }
 
 // CustomURLSettings returns the custom url settings for this provider
