@@ -44,7 +44,7 @@ func TestMigrateAzureADV2ToOIDC(t *testing.T) {
 	defer test.MockVariableValue(&setting.OAuth2Client.Username, setting.OAuth2UsernameUserid)()
 
 	const (
-		sourceName = "test-migrate-azure-to-oidc"
+		sourceName = "test-migrate-azure"
 
 		// oidValue is the stable Azure AD Object ID, used as ExternalID by the Azure AD V2 provider.
 		oidValue = "oid-object-id-stable"
