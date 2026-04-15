@@ -49,6 +49,8 @@ func (o *OpenIDProvider) CreateGothProvider(providerName, callbackURL string, so
 		return nil, err
 	}
 	if source.ExternalIDClaim != "" {
+		// UserIdClaims is a fallback list; goth returns the first non-empty matching claim.
+		// A single entry is sufficient because the admin explicitly chooses one claim (e.g. "oid" for Azure AD).
 		provider.UserIdClaims = []string{source.ExternalIDClaim}
 	}
 	return provider, nil
