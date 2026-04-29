@@ -10,6 +10,7 @@ import (
 
 	actions_model "code.gitea.io/gitea/models/actions"
 	"code.gitea.io/gitea/models/db"
+	"code.gitea.io/gitea/modules/actions/jobparser"
 	"code.gitea.io/gitea/modules/container"
 	"code.gitea.io/gitea/modules/graceful"
 	"code.gitea.io/gitea/modules/log"
@@ -234,6 +235,14 @@ func checkJobsOfCurrentRunAttempt(ctx context.Context, run *actions_model.Action
 	}
 	resolver := newJobStatusResolver(jobs, vars)
 
+	var attempt *actions_model.ActionRunAttempt
+	if run.LatestAttemptID > 0 {
+		attempt, err = actions_model.GetRunAttemptByRepoAndID(ctx, run.RepoID, run.LatestAttemptID)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	}
+
 	if err = db.WithTx(ctx, func(ctx context.Context) error {
 		for _, job := range jobs {
 			job.Run = run
@@ -241,22 +250,43 @@ func checkJobsOfCurrentRunAttempt(ctx context.Context, run *actions_model.Action
 
 		updates := resolver.Resolve(ctx)
 		for _, job := range jobs {
-			if status, ok := updates[job.ID]; ok {
-				job.Status = status
-				if n, err := actions_model.UpdateRunJob(ctx, job, builder.Eq{"status": actions_model.StatusBlocked}, "status"); err != nil {
-					return err
-				} else if n != 1 {
-					return fmt.Errorf("no affected for updating blocked job %v", job.ID)
-				}
-				updatedJobs = append(updatedJobs, job)
+			status, ok := updates[job.ID]
+			if !ok {
+				continue
 			}
+			if job.IsReusableCaller {
+				switch status {
+				case actions_model.StatusWaiting:
+					subUpdated, subCancelled, err := triggerCallerReady(ctx, run, attempt, job, jobs, vars)
+					if err != nil {
+						return fmt.Errorf("trigger caller-ready %d: %w", job.ID, err)
+					}
+					updatedJobs = append(updatedJobs, subUpdated...)
+					cancelledJobs = append(cancelledJobs, subCancelled...)
+				case actions_model.StatusSkipped:
+					if err := skipCallerSubtree(ctx, job, jobs); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+
+			// Non-caller: standard status update.
+			job.Status = status
+			if n, err := actions_model.UpdateRunJob(ctx, job, builder.Eq{"status": actions_model.StatusBlocked}, "status"); err != nil {
+				return err
+			} else if n != 1 {
+				return fmt.Errorf("no affected for updating blocked job %v", job.ID)
+			}
+			updatedJobs = append(updatedJobs, job)
 		}
+		cancelledJobs = append(cancelledJobs, resolver.cancelledJobs...)
 		return nil
 	}); err != nil {
 		return nil, nil, nil, err
 	}
 
-	return jobs, updatedJobs, resolver.cancelledJobs, nil
+	return jobs, updatedJobs, cancelledJobs, nil
 }
 
 type jobStatusResolver struct {
@@ -268,10 +298,17 @@ type jobStatusResolver struct {
 }
 
 func newJobStatusResolver(jobs actions_model.ActionJobList, vars map[string]string) *jobStatusResolver {
-	idToJobs := make(map[string][]*actions_model.ActionRunJob, len(jobs))
+	// Scope-aware: needs are resolved within the same ParentCallJobID scope so the same
+	// JobID in different reusable workflow calls does not cross-link.
+	scopedIDToJobs := make(map[int64]map[string][]*actions_model.ActionRunJob)
 	jobMap := make(map[int64]*actions_model.ActionRunJob)
 	for _, job := range jobs {
-		idToJobs[job.JobID] = append(idToJobs[job.JobID], job)
+		scope := scopedIDToJobs[job.ParentCallJobID]
+		if scope == nil {
+			scope = make(map[string][]*actions_model.ActionRunJob)
+			scopedIDToJobs[job.ParentCallJobID] = scope
+		}
+		scope[job.JobID] = append(scope[job.JobID], job)
 		jobMap[job.ID] = job
 	}
 
@@ -279,8 +316,9 @@ func newJobStatusResolver(jobs actions_model.ActionJobList, vars map[string]stri
 	needs := make(map[int64][]int64, len(jobs))
 	for _, job := range jobs {
 		statuses[job.ID] = job.Status
+		scope := scopedIDToJobs[job.ParentCallJobID]
 		for _, need := range job.Needs {
-			for _, v := range idToJobs[need] {
+			for _, v := range scope[need] {
 				needs[job.ID] = append(needs[job.ID], v.ID)
 			}
 		}
@@ -322,12 +360,26 @@ func (r *jobStatusResolver) resolveCheckNeeds(id int64) (allDone, allSucceed boo
 	return allDone, allSucceed
 }
 
-func (r *jobStatusResolver) resolveJobHasIfCondition(actionRunJob *actions_model.ActionRunJob) (hasIf bool) {
-	// FIXME evaluate this on the server side
-	if job, err := actionRunJob.ParseJob(); err == nil {
-		return len(job.If.Value) > 0
+// evaluateJobIf evaluates a job's `if`
+func evaluateJobIf(ctx context.Context, run *actions_model.ActionRun, attempt *actions_model.ActionRunAttempt, job *actions_model.ActionRunJob, vars map[string]string, allNeedsSucceed bool) (bool, error) {
+	parsedJob, err := job.ParseJob()
+	if err != nil {
+		return false, err
 	}
-	return hasIf
+	// Empty `if:` reduces to implicit `success()` - true iff every need finished as Success.
+	if len(parsedJob.If.Value) == 0 {
+		return allNeedsSucceed, nil
+	}
+	jobResults, err := findJobNeedsAndFillJobResults(ctx, job)
+	if err != nil {
+		return false, err
+	}
+	inputs, err := getInputsFromRun(run)
+	if err != nil {
+		return false, err
+	}
+	gitCtx := GenerateGiteaContext(ctx, run, attempt, job)
+	return jobparser.EvaluateJobIfExpression(job.JobID, parsedJob, gitCtx, jobResults, vars, inputs)
 }
 
 func (r *jobStatusResolver) resolve(ctx context.Context) map[int64]actions_model.Status {
@@ -336,6 +388,13 @@ func (r *jobStatusResolver) resolve(ctx context.Context) map[int64]actions_model
 		actionRunJob := r.jobMap[id]
 		if status != actions_model.StatusBlocked {
 			continue
+		}
+		// A child of a caller cannot start until the caller has become "ready" (CallPayload
+		// populated). Look up the parent caller's state in jobMap.
+		if actionRunJob.ParentCallJobID > 0 {
+			if parent, ok := r.jobMap[actionRunJob.ParentCallJobID]; ok && parent.CallPayload == "" {
+				continue
+			}
 		}
 		allDone, allSucceed := r.resolveCheckNeeds(id)
 		if !allDone {
@@ -347,18 +406,15 @@ func (r *jobStatusResolver) resolve(ctx context.Context) map[int64]actions_model
 		if err != nil {
 			// The err can be caused by different cases: database error, or syntax error, or the needed jobs haven't completed
 			// At the moment there is no way to distinguish them.
-			// Actually, for most cases, the error is caused by "syntax error" / "the needed jobs haven't completed (skipped?)"
 			// TODO: if workflow or concurrency expression has syntax error, there should be a user error message, need to show it to end users
 			log.Debug("updateConcurrencyEvaluationForJobWithNeeds failed, this job will stay blocked: job: %d, err: %v", id, err)
 			continue
 		}
 
-		shouldStartJob := true
-		if !allSucceed {
-			// Not all dependent jobs completed successfully:
-			// * if the job has "if" condition, it can be started, then the act_runner will evaluate the "if" condition.
-			// * otherwise, the job should be skipped.
-			shouldStartJob = r.resolveJobHasIfCondition(actionRunJob)
+		shouldStartJob, err := evaluateJobIf(ctx, actionRunJob.Run, nil, actionRunJob, r.vars, allSucceed)
+		if err != nil {
+			log.Debug("evaluateJobIf failed, job will stay blocked: job: %d, err: %v", id, err)
+			continue
 		}
 
 		newStatus := util.Iif(shouldStartJob, actions_model.StatusWaiting, actions_model.StatusSkipped)

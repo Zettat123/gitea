@@ -75,6 +75,33 @@ type ActionRunJob struct {
 	// A value of 0 indicates a legacy job created before ActionRunAttempt existed.
 	AttemptJobID int64 `xorm:"index NOT NULL DEFAULT 0"`
 
+	// IsReusableCaller marks this job as a reusable workflow caller.
+	// Caller jobs do not run on a runner; their status is derived from their child jobs.
+	IsReusableCaller bool `xorm:"index NOT NULL DEFAULT FALSE"`
+	// CallUses stores the raw "uses:" string of a reusable workflow caller job.
+	// Only set when IsReusableCaller is true.
+	CallUses string `xorm:"VARCHAR(512) NOT NULL DEFAULT ''"`
+	// ReusableWorkflowContent is the content of the reusable workflow specified by "uses:".
+	// Only set when IsReusableCaller is true.
+	ReusableWorkflowContent []byte `xorm:"LONGBLOB"`
+	// CallSecrets encodes the reusable workflow caller's "secrets:" section:
+	//   - ""           : no "secrets:" section (children only see auto-generated tokens).
+	//   - "inherit"    : the caller wrote "secrets: inherit".
+	//   - JSON object  : explicit mapping {alias: source_name}; names only, no values.
+	// Only set when IsReusableCaller is true.
+	CallSecrets string `xorm:"LONGTEXT"`
+	// CallPayload is the JSON-encoded WorkflowCallPayload. It can indicate whether the caller job is ready.
+	//   - "" : the caller has not yet been readied - it is still blocked by its `needs` or `concurrency`.
+	//          Children under this caller still hold unresolved `${{ inputs.* }}` placeholders.
+	//   - non-empty : the caller is ready - the children's WorkflowPayload have been re-rendered with resolved inputs,
+	//                 and they are eligible to run once needs/if/concurrency checks are passed.
+	// The transition empty -> non-empty is one-way.
+	// Only set when IsReusableCaller is true.
+	CallPayload string `xorm:"LONGTEXT 'call_payload'"`
+
+	// ParentCallJobID is the ID of the direct reusable workflow caller job, or 0 for top-level jobs.
+	ParentCallJobID int64 `xorm:"index NOT NULL DEFAULT 0"`
+
 	Started timeutil.TimeStamp
 	Stopped timeutil.TimeStamp
 	Created timeutil.TimeStamp `xorm:"created"`
@@ -218,6 +245,46 @@ func GetRunJobsByRunAndAttemptID(ctx context.Context, runID, runAttemptID int64)
 	return jobs, nil
 }
 
+// GetReusableCallerDirectChildJobs returns the direct child jobs of a reusable workflow caller job.
+func GetReusableCallerDirectChildJobs(ctx context.Context, callerJob *ActionRunJob) (ActionJobList, error) {
+	var jobs []*ActionRunJob
+	if err := db.GetEngine(ctx).
+		Where("run_id=? AND parent_call_job_id=?", callerJob.RunID, callerJob.ID).
+		OrderBy("id").
+		Find(&jobs); err != nil {
+		return nil, err
+	}
+	return jobs, nil
+}
+
+// CollectReusableCallerAllChildJobs returns every job in `allJobs` that lives under caller's subtree (recursively), excluding `caller` itself
+func CollectReusableCallerAllChildJobs(caller *ActionRunJob, allJobs []*ActionRunJob) []*ActionRunJob {
+	parents := map[int64]bool{caller.ID: true}
+	for {
+		grew := false
+		for _, j := range allJobs {
+			if j.ParentCallJobID == 0 {
+				continue
+			}
+			if parents[j.ParentCallJobID] && !parents[j.ID] {
+				parents[j.ID] = true
+				grew = true
+			}
+		}
+		if !grew {
+			break
+		}
+	}
+	out := make([]*ActionRunJob, 0)
+	for _, j := range allJobs {
+		if j.ID == caller.ID || !parents[j.ID] {
+			continue
+		}
+		out = append(out, j)
+	}
+	return out
+}
+
 func UpdateRunJob(ctx context.Context, job *ActionRunJob, cond builder.Cond, cols ...string) (int64, error) {
 	e := db.GetEngine(ctx)
 
@@ -251,6 +318,13 @@ func UpdateRunJob(ctx context.Context, job *ActionRunJob, cond builder.Cond, col
 		if job, err = GetRunJobByRepoAndID(ctx, job.RepoID, job.ID); err != nil {
 			return 0, err
 		}
+	}
+
+	// Reusable workflow caller's children cascade their status changes upward to the
+	// parent caller; the parent's UpdateRunJob (recursive) eventually hits a top-level
+	// job and runs the attempt aggregation below.
+	if slices.Contains(cols, "status") && job.ParentCallJobID > 0 {
+		return affected, cascadeCallerStatus(ctx, job)
 	}
 
 	{
@@ -303,6 +377,96 @@ func UpdateRunJob(ctx context.Context, job *ActionRunJob, cond builder.Cond, col
 	}
 
 	return affected, nil
+}
+
+// cascadeCallerStatus loads `child`'s parent caller, re-derives its Status from
+// aggregateReusableCallerStatus(children), tracks Started / Stopped timestamps, and
+// writes the result through UpdateRunJob — that write itself cascades further when
+// the parent is itself a child caller, so the chain reaches a top-level job and
+// the attempt aggregation branch in UpdateRunJob.
+//
+// caller.Status mirrors the subtree exactly: a caller whose subtree is fully
+// Blocked is itself Blocked. "Initialized vs uninitialized" lives in CallPayload,
+// not in Status.
+//
+// Empty subtrees are rejected at expansion time (services/actions/reusable.go's
+// expandReusableCaller errors on a called workflow with zero jobs), so the parent
+// loaded here always has ≥ 1 child.
+func cascadeCallerStatus(ctx context.Context, child *ActionRunJob) error {
+	parent, err := GetRunJobByRunAndID(ctx, child.RunID, child.ParentCallJobID)
+	if err != nil {
+		return fmt.Errorf("load parent caller %d: %w", child.ParentCallJobID, err)
+	}
+	if !parent.IsReusableCaller {
+		return nil
+	}
+	children, err := GetReusableCallerDirectChildJobs(ctx, parent)
+	if err != nil {
+		return err
+	}
+	newStatus := aggregateReusableCallerStatus(children)
+	cols := make([]string, 0, 3)
+	if parent.Status != newStatus {
+		parent.Status = newStatus
+		cols = append(cols, "status")
+	}
+	// Skipped subtrees never executed — leave Started/Stopped untouched so the row
+	// reflects "no run took place" rather than fabricated timestamps.
+	if newStatus != StatusSkipped {
+		now := timeutil.TimeStampNow()
+		if parent.Started.IsZero() && newStatus != StatusBlocked {
+			parent.Started = now
+			cols = append(cols, "started")
+		}
+		if parent.Stopped.IsZero() && newStatus.IsDone() {
+			parent.Stopped = now
+			cols = append(cols, "stopped")
+		}
+	}
+	if len(cols) == 0 {
+		return nil
+	}
+	_, err = UpdateRunJob(ctx, parent, nil, cols...)
+	return err
+}
+
+// aggregateReusableCallerStatus derives a reusable workflow caller's status from its direct children.
+//
+// Unlike AggregateJobStatus, a reusable workflow caller can only be Done when all its children are Done.
+//
+// Two-stage rule:
+//  1. If any child is not Done, return Running > Waiting > Blocked. The caller is still in progress.
+//  2. Once every child is Done, defer to AggregateJobStatus for the terminal status.
+func aggregateReusableCallerStatus(jobs []*ActionRunJob) Status {
+	var hasRunning, hasWaiting, hasBlocked, allDone bool
+	allDone = len(jobs) != 0
+	for _, j := range jobs {
+		if j.Status.IsDone() {
+			continue
+		}
+		allDone = false
+		switch j.Status {
+		case StatusRunning:
+			hasRunning = true
+		case StatusWaiting:
+			hasWaiting = true
+		case StatusBlocked:
+			hasBlocked = true
+		}
+	}
+	if !allDone {
+		switch {
+		case hasRunning:
+			return StatusRunning
+		case hasWaiting:
+			return StatusWaiting
+		case hasBlocked:
+			return StatusBlocked
+		default:
+			return StatusUnknown // it shouldn't happen
+		}
+	}
+	return AggregateJobStatus(jobs)
 }
 
 func AggregateJobStatus(jobs []*ActionRunJob) Status {

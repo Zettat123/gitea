@@ -295,48 +295,85 @@ func CancelPreviousJobs(ctx context.Context, repoID int64, ref, workflowID strin
 
 func CancelJobs(ctx context.Context, jobs []*ActionRunJob) ([]*ActionRunJob, error) {
 	cancelledJobs := make([]*ActionRunJob, 0, len(jobs))
-	// Iterate over each job and attempt to cancel it.
+
 	for _, job := range jobs {
-		// Skip jobs that are already in a terminal state (completed, cancelled, etc.).
-		status := job.Status
-		if status.IsDone() {
-			continue
-		}
-
-		// If the job has no associated task (probably an error), set its status to 'Cancelled' and stop it.
-		if job.TaskID == 0 {
-			job.Status = StatusCancelled
-			job.Stopped = timeutil.TimeStampNow()
-
-			// Update the job's status and stopped time in the database.
-			n, err := UpdateRunJob(ctx, job, builder.Eq{"task_id": 0}, "status", "stopped")
+		if job.IsReusableCaller {
+			sub, err := cancelReusableCaller(ctx, job)
 			if err != nil {
 				return cancelledJobs, err
 			}
-
-			// If the update affected 0 rows, it means the job has changed in the meantime
-			if n == 0 {
-				log.Error("Failed to cancel job %d because it has changed", job.ID)
-				continue
-			}
-
-			cancelledJobs = append(cancelledJobs, job)
-			// Continue with the next job.
+			cancelledJobs = append(cancelledJobs, sub...)
 			continue
 		}
 
-		// If the job has an associated task, try to stop the task, effectively cancelling the job.
-		if err := StopTask(ctx, job.TaskID, StatusCancelled); err != nil {
+		c, err := cancelOneJob(ctx, job)
+		if err != nil {
 			return cancelledJobs, err
 		}
-		updatedJob, err := GetRunJobByRunAndID(ctx, job.RunID, job.ID)
-		if err != nil {
-			return cancelledJobs, fmt.Errorf("get job: %w", err)
+		if c != nil {
+			cancelledJobs = append(cancelledJobs, c)
 		}
-		cancelledJobs = append(cancelledJobs, updatedJob)
+	}
+	return cancelledJobs, nil
+}
+
+// cancelOneJob cancels a single job (no subtree handling) and returns the post-cancel
+// row, or nil when the job was already in a terminal state or the optimistic-lock
+// update affected 0 rows.
+func cancelOneJob(ctx context.Context, job *ActionRunJob) (*ActionRunJob, error) {
+	if job.Status.IsDone() {
+		return nil, nil //nolint:nilnil // signal "nothing to cancel; not an error"
+	}
+	// No associated task — mark Cancelled directly. This includes reusable
+	// caller rows (no runner task) and jobs that never reached PickTask.
+	if job.TaskID == 0 {
+		job.Status = StatusCancelled
+		job.Stopped = timeutil.TimeStampNow()
+		n, err := UpdateRunJob(ctx, job, builder.Eq{"task_id": 0}, "status", "stopped")
+		if err != nil {
+			return nil, err
+		}
+		if n == 0 {
+			log.Error("Failed to cancel job %d because it has changed", job.ID)
+			return nil, nil //nolint:nilnil // signal "nothing to cancel; not an error"
+		}
+		return job, nil
+	}
+	// Has a task: stop the task and re-read the row.
+	if err := StopTask(ctx, job.TaskID, StatusCancelled); err != nil {
+		return nil, err
+	}
+	updated, err := GetRunJobByRunAndID(ctx, job.RunID, job.ID)
+	if err != nil {
+		return nil, fmt.Errorf("get job: %w", err)
+	}
+	return updated, nil
+}
+
+// cancelReusableCaller cancels `caller` and all its child jobs
+func cancelReusableCaller(ctx context.Context, caller *ActionRunJob) ([]*ActionRunJob, error) {
+	cancelledJobs := make([]*ActionRunJob, 0)
+
+	if c, err := cancelOneJob(ctx, caller); err != nil {
+		return cancelledJobs, err
+	} else if c != nil {
+		cancelledJobs = append(cancelledJobs, c)
 	}
 
-	// Return nil to indicate successful cancellation of all running and waiting jobs.
+	attemptJobs, err := GetRunJobsByRunAndAttemptID(ctx, caller.RunID, caller.RunAttemptID)
+	if err != nil {
+		return cancelledJobs, err
+	}
+
+	for _, c := range CollectReusableCallerAllChildJobs(caller, attemptJobs) {
+		cancelled, err := cancelOneJob(ctx, c)
+		if err != nil {
+			return cancelledJobs, err
+		}
+		if cancelled != nil {
+			cancelledJobs = append(cancelledJobs, cancelled)
+		}
+	}
 	return cancelledJobs, nil
 }
 

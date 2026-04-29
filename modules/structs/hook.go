@@ -571,6 +571,27 @@ func (p *WorkflowDispatchPayload) JSONPayload() ([]byte, error) {
 	return json.MarshalIndent(p, "", "  ")
 }
 
+// WorkflowCallPayload is the persisted readiness payload of a reusable workflow caller.
+// Its Inputs field is injected into the called workflow's github.event.inputs at
+// step-evaluation time; the other fields are kept for traceability / future use.
+type WorkflowCallPayload struct {
+	// The name or path of the caller workflow file
+	Workflow string `json:"workflow"`
+	// The git reference (branch, tag, or commit SHA) the caller run is on
+	Ref string `json:"ref"`
+	// Input parameters resolved for this reusable workflow call
+	Inputs map[string]any `json:"inputs"`
+	// The repository of the caller run
+	Repository *Repository `json:"repository"`
+	// The user who triggered the caller workflow run
+	Sender *User `json:"sender"`
+}
+
+// JSONPayload implements Payload
+func (p *WorkflowCallPayload) JSONPayload() ([]byte, error) {
+	return json.MarshalIndent(p, "", "  ")
+}
+
 // CommitStatusPayload represents a payload information of commit status event.
 type CommitStatusPayload struct {
 	// TODO: add Branches per https://docs.github.com/en/webhooks/webhook-events-and-payloads#status

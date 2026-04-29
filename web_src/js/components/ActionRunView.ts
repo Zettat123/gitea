@@ -87,6 +87,44 @@ export function createLogLineMessage(line: LogLine, cmd: LogLineCommand | null) 
   return logMsg;
 }
 
+// buildJobsByParentCallJobID groups jobs by their parentCallJobID (0 = top level).
+// Useful for rendering the reusable-workflow caller/child tree in the sidebar.
+export function buildJobsByParentCallJobID(jobs: ActionsJob[]): Map<number, ActionsJob[]> {
+  const childrenByParent = new Map<number, ActionsJob[]>();
+  for (const job of jobs) {
+    const parentID = job.parentCallJobID || 0;
+    const existing = childrenByParent.get(parentID);
+    if (existing) {
+      existing.push(job);
+    } else {
+      childrenByParent.set(parentID, [job]);
+    }
+  }
+  return childrenByParent;
+}
+
+// collectCallerChildJobs returns the direct children of a caller job.
+export function collectCallerChildJobs(jobs: ActionsJob[], callerJobID: number): ActionsJob[] {
+  if (!callerJobID) return [];
+  return buildJobsByParentCallJobID(jobs).get(callerJobID) || [];
+}
+
+// aggregateSubsetStatus mirrors AggregateJobStatus on the backend for a subset of jobs.
+// Only used in the UI for showing a caller's apparent status when no job_status is yet aggregated.
+export function aggregateSubsetStatus(jobs: ActionsJob[]): ActionsRunStatus {
+  if (jobs.length === 0) return 'unknown';
+  const allSkipped = jobs.every((j) => j.status === 'skipped');
+  if (allSkipped) return 'skipped';
+  const allDone = jobs.every((j) => j.status === 'success' || j.status === 'skipped');
+  if (allDone) return 'success';
+  if (jobs.some((j) => j.status === 'cancelled')) return 'cancelled';
+  if (jobs.some((j) => j.status === 'running')) return 'running';
+  if (jobs.some((j) => j.status === 'waiting')) return 'waiting';
+  if (jobs.some((j) => j.status === 'failure')) return 'failure';
+  if (jobs.some((j) => j.status === 'blocked')) return 'blocked';
+  return 'unknown';
+}
+
 export function createEmptyActionsRun(): ActionsRun {
   return {
     repoId: 0,

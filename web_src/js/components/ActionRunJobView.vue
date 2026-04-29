@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {nextTick, onBeforeUnmount, onMounted, ref, toRefs, watch} from 'vue';
+import {computed, nextTick, onBeforeUnmount, onMounted, ref, toRefs, watch} from 'vue';
 import {SvgIcon} from '../svg.ts';
 import ActionRunStatus from './ActionRunStatus.vue';
 import {addDelegatedEventListener, createElementFromAttrs, toggleElem} from '../utils/dom.ts';
@@ -8,13 +8,15 @@ import {POST} from '../modules/fetch.ts';
 import type {IntervalId} from '../types.ts';
 import {toggleFullScreen} from '../utils.ts';
 import {localUserSettings} from '../modules/user-settings.ts';
-import type {ActionsArtifact, ActionsRun, ActionsRunStatus} from '../modules/gitea-actions.ts';
+import type {ActionsArtifact, ActionsJob, ActionsRun, ActionsRunStatus} from '../modules/gitea-actions.ts';
 import {
   type ActionRunViewStore,
+  aggregateSubsetStatus,
+  collectCallerChildJobs,
   createLogLineMessage,
   type LogLine,
   type LogLineCommand,
-  parseLogLineCommand
+  parseLogLineCommand,
 } from './ActionRunView.ts';
 
 function isLogElementInViewport(el: Element, {extraViewPortHeight}={extraViewPortHeight: 0}): boolean {
@@ -115,6 +117,20 @@ const currentJob = ref<CurrentJob>({
 const stepsContainer = ref<HTMLElement | null>(null);
 const jobStepLogs = ref<Array<StepContainerElement | undefined>>([]);
 
+// Reusable workflow caller view: when the selected job is a caller node, the right pane
+// shows the children list rather than step logs (callers don't run on a runner).
+const selectedJob = computed<ActionsJob | undefined>(() => (run.value.jobs || []).find((it) => it.id === props.jobId));
+const isCallerJob = computed(() => Boolean(selectedJob.value?.isReusableCaller));
+const callerChildJobs = computed<ActionsJob[]>(() => {
+  if (!isCallerJob.value) return [];
+  return collectCallerChildJobs(run.value.jobs || [], props.jobId);
+});
+const callerSummaryStatus = computed<ActionsRunStatus>(() => {
+  if (!isCallerJob.value) return 'unknown';
+  if (selectedJob.value && selectedJob.value.status !== 'unknown') return selectedJob.value.status;
+  return aggregateSubsetStatus(callerChildJobs.value);
+});
+
 watch(optionAlwaysAutoScroll, () => {
   saveLocaleStorageOptions();
 });
@@ -124,6 +140,13 @@ watch(optionAlwaysExpandRunning, () => {
 });
 
 onMounted(async () => {
+  // Caller jobs (reusable workflow group nodes) never produce step logs; the parent component
+  // already polls run state, so we don't need to call loadJob/hashChange machinery for them.
+  document.body.addEventListener('click', closeDropdown);
+  if (isCallerJob.value) {
+    return;
+  }
+
   // load job data and then auto-reload periodically
   // need to await first loadJob so this.currentJobStepsStates is initialized and can be used in hashChangeListener
   await loadJob();
@@ -141,14 +164,15 @@ onMounted(async () => {
   });
 
   intervalID = setInterval(() => void loadJob(), 1000);
-  document.body.addEventListener('click', closeDropdown);
   void hashChangeListener();
   window.addEventListener('hashchange', hashChangeListener);
 });
 
 onBeforeUnmount(() => {
   document.body.removeEventListener('click', closeDropdown);
-  window.removeEventListener('hashchange', hashChangeListener);
+  if (!isCallerJob.value) {
+    window.removeEventListener('hashchange', hashChangeListener);
+  }
   // clear the interval timer when the component is unmounted
   // even our page is rendered once, not spa style
   if (intervalID) {
@@ -404,9 +428,12 @@ async function hashChangeListener() {
   <div class="job-info-header">
     <div class="job-info-header-left gt-ellipsis">
       <h3 class="job-info-header-title gt-ellipsis">
-        {{ currentJob.title }}
+        {{ isCallerJob ? selectedJob?.name : currentJob.title }}
       </h3>
-      <p class="job-info-header-detail">
+      <p class="job-info-header-detail" v-if="isCallerJob">
+        {{ selectedJob?.callUses }}
+      </p>
+      <p class="job-info-header-detail" v-else>
         {{ currentJob.detail }}
       </p>
     </div>
@@ -446,8 +473,26 @@ async function hashChangeListener() {
       </div>
     </div>
   </div>
+  <!-- Caller (reusable workflow) view: list children instead of step logs. -->
+  <div class="caller-children-container" v-if="isCallerJob">
+    <div class="caller-children-header">
+      <ActionRunStatus :status="callerSummaryStatus" :locale-status="locale.status[callerSummaryStatus]"/>
+      <span class="tw-flex-1">{{ locale.allJobs }}</span>
+      <span class="tw-text-text-light-2">{{ callerChildJobs.length }}</span>
+    </div>
+    <ul class="ui relaxed list">
+      <li class="item caller-child-item" v-for="child in callerChildJobs" :key="child.id">
+        <a class="tw-contents silenced" :href="child.link">
+          <ActionRunStatus :locale-status="locale.status[child.status]" :status="child.status"/>
+          <span class="tw-flex-1 gt-ellipsis">{{ child.name }}</span>
+          <span>{{ child.duration }}</span>
+        </a>
+      </li>
+    </ul>
+  </div>
+
   <!-- always create the node because we have our own event listeners on it, don't use "v-if" -->
-  <div class="job-step-container" ref="stepsContainer" v-show="currentJob.steps.length">
+  <div class="job-step-container" ref="stepsContainer" v-show="!isCallerJob && currentJob.steps.length">
     <div class="job-step-section" v-for="(jobStep, stepIdx) in currentJob.steps" :key="stepIdx">
       <div
         class="job-step-summary"
@@ -478,6 +523,32 @@ async function hashChangeListener() {
   </div>
 </template>
 <style scoped>
+.caller-children-container {
+  padding: 12px 14px 18px;
+  color: var(--color-console-fg);
+}
+
+.caller-children-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: var(--font-weight-semibold);
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-console-border);
+  margin-bottom: 8px;
+}
+
+.caller-child-item {
+  padding: 6px 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.caller-child-item:hover {
+  background: var(--color-console-hover-bg);
+}
+
 /* begin fomantic dropdown menu overrides */
 
 .action-view-right .ui.dropdown .menu {

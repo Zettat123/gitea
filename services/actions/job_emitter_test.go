@@ -4,11 +4,14 @@
 package actions
 
 import (
+	"fmt"
 	"testing"
 
 	actions_model "code.gitea.io/gitea/models/actions"
 	"code.gitea.io/gitea/models/db"
+	repo_model "code.gitea.io/gitea/models/repo"
 	"code.gitea.io/gitea/models/unittest"
+	user_model "code.gitea.io/gitea/models/user"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -129,10 +132,49 @@ jobs:
 			want: map[int64]actions_model.Status{2: actions_model.StatusSkipped},
 		},
 	}
-	for _, tt := range tests {
+	assert.NoError(t, unittest.PrepareTestDatabase())
+	ctx := t.Context()
+	stubRun := &actions_model.ActionRun{TriggerUser: &user_model.User{}, Repo: &repo_model.Repository{}}
+	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Each subtest gets a unique RunID / RunAttemptID so jobs from different
+			// subtests don't bleed into each other's FindTaskNeeds queries (DB rows
+			// from earlier subtests stay around but are filtered out by run scope).
+			runID := int64(9001 + i)
+			attemptID := int64(9001 + i)
+
+			// Server-side `if:` evaluation routes through findJobNeedsAndFillJobResults
+			// → FindTaskNeeds → DB query, so the resolver only sees needs status when
+			// jobs are persisted. Insert each test job (letting the DB assign IDs) and
+			// remember the test→DB ID mapping so we can translate the expected map.
+			idMap := make(map[int64]int64, len(tt.jobs))
+			for _, j := range tt.jobs {
+				origID := j.ID
+				j.ID = 0
+				j.RunID = runID
+				j.RunAttemptID = attemptID
+				j.Run = stubRun
+				if j.Status == actions_model.StatusBlocked && len(j.WorkflowPayload) == 0 {
+					j.WorkflowPayload = fmt.Appendf(nil, `name: test
+on: push
+jobs:
+  %s:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo
+`, j.JobID)
+				}
+				assert.NoError(t, db.Insert(ctx, j))
+				idMap[origID] = j.ID
+			}
+
+			want := make(map[int64]actions_model.Status, len(tt.want))
+			for k, v := range tt.want {
+				want[idMap[k]] = v
+			}
+
 			r := newJobStatusResolver(tt.jobs, nil)
-			assert.Equal(t, tt.want, r.Resolve(t.Context()))
+			assert.Equal(t, want, r.Resolve(ctx))
 		})
 	}
 }

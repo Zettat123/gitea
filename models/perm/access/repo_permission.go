@@ -655,3 +655,20 @@ func CheckRepoUnitUser(ctx context.Context, repo *repo_model.Repository, user *u
 func PermissionNoAccess() Permission {
 	return Permission{AccessMode: perm_model.AccessModeNone}
 }
+
+// CanReadWorkflowCrossRepo checks whether the run can read workflow files from targetRepo, in the context of
+func CanReadWorkflowCrossRepo(ctx context.Context, targetRepo *repo_model.Repository, run *actions_model.ActionRun) (bool, error) {
+	if err := run.LoadRepo(ctx); err != nil {
+		return false, err
+	}
+
+	if checkSameOwnerCrossRepoAccess(ctx, run.Repo, targetRepo, run.IsForkPullRequest) {
+		return true, nil
+	}
+
+	botPerm, err := GetIndividualUserRepoPermission(ctx, targetRepo, user_model.NewActionsUser())
+	if err != nil {
+		return false, err
+	}
+	return botPerm.AccessMode >= perm_model.AccessModeRead, nil
+}

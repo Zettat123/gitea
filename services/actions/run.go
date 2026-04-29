@@ -10,6 +10,7 @@ import (
 	actions_model "code.gitea.io/gitea/models/actions"
 	"code.gitea.io/gitea/models/db"
 	"code.gitea.io/gitea/modules/actions/jobparser"
+	"code.gitea.io/gitea/modules/log"
 	"code.gitea.io/gitea/modules/util"
 
 	act_model "github.com/nektos/act/pkg/model"
@@ -55,6 +56,7 @@ func PrepareRunAndInsert(ctx context.Context, content []byte, run *actions_model
 // The title will be cut off at 255 characters if it's longer than 255 characters.
 func InsertRun(ctx context.Context, run *actions_model.ActionRun, content []byte, vars map[string]string, inputs map[string]any, wfRawConcurrency *act_model.RawConcurrency) error {
 	var cancelledConcurrencyJobs []*actions_model.ActionRunJob
+	var hasCallerJobs bool
 	if err := db.WithTx(ctx, func(ctx context.Context) error {
 		index, err := db.GetNextResourceIndex(ctx, "action_run_index", run.RepoID)
 		if err != nil {
@@ -128,7 +130,11 @@ func InsertRun(ctx context.Context, run *actions_model.ActionRun, content []byte
 		runJobs := make([]*actions_model.ActionRunJob, 0, len(jobs))
 		var hasWaitingJobs bool
 
-		for i, v := range jobs {
+		// nextAttemptJobID is the shared sequential counter used for AttemptJobID across top-level jobs and reusable workflow jobs.
+		// AttemptJobID must be unique within an attempt, so it's incremented for every ActionRunJob insert.
+		nextAttemptJobID := int64(1)
+
+		for _, v := range jobs {
 			id, job := v.Job()
 			needs := job.Needs()
 			if err := v.SetJob(id, job.EraseNeeds()); err != nil {
@@ -136,7 +142,8 @@ func InsertRun(ctx context.Context, run *actions_model.ActionRun, content []byte
 			}
 			payload, _ := v.Marshal()
 
-			shouldBlockJob := runAttempt.Status == actions_model.StatusBlocked || len(needs) > 0 || run.NeedApproval
+			isReusableWorkflowCaller := job.Uses != ""
+			shouldBlockJob := runAttempt.Status == actions_model.StatusBlocked || len(needs) > 0 || run.NeedApproval || isReusableWorkflowCaller
 
 			job.Name = util.EllipsisDisplayString(job.Name, 255)
 			runJob := &actions_model.ActionRunJob{
@@ -150,14 +157,21 @@ func InsertRun(ctx context.Context, run *actions_model.ActionRun, content []byte
 				Attempt:           runAttempt.Attempt,
 				WorkflowPayload:   payload,
 				JobID:             id,
-				AttemptJobID:      int64(i + 1),
+				AttemptJobID:      nextAttemptJobID,
 				Needs:             needs,
 				RunsOn:            job.RunsOn(),
 				Status:            util.Iif(shouldBlockJob, actions_model.StatusBlocked, actions_model.StatusWaiting),
 			}
+			nextAttemptJobID++
 			// Parse workflow/job permissions (no clamping here)
 			if perms := ExtractJobPermissionsFromWorkflow(v, job); perms != nil {
 				runJob.TokenPermissions = perms
+			}
+
+			if isReusableWorkflowCaller {
+				runJob.IsReusableCaller = true
+				runJob.CallUses = job.Uses
+				hasCallerJobs = true
 			}
 
 			// check job concurrency
@@ -194,8 +208,17 @@ func InsertRun(ctx context.Context, run *actions_model.ActionRun, content []byte
 			}
 
 			runJobs = append(runJobs, runJob)
+
+			if runJob.IsReusableCaller {
+				// expand the reusable workflow caller
+				if err := expandReusableCaller(ctx, run, runAttempt, runJob, job, &nextAttemptJobID); err != nil {
+					return fmt.Errorf("expand caller %d: %w", runJob.ID, err)
+				}
+			}
 		}
 
+		// Aggregate over the top-level rows only. Child rows are Blocked at this point and
+		// caller rows already reflect the "not started" state, so this matches the run's intent.
 		runAttempt.Status = actions_model.AggregateJobStatus(runJobs)
 		if err := actions_model.UpdateRunAttempt(ctx, runAttempt, "status"); err != nil {
 			return err
@@ -215,6 +238,15 @@ func InsertRun(ctx context.Context, run *actions_model.ActionRun, content []byte
 
 	NotifyWorkflowJobsAndRunsStatusUpdate(ctx, cancelledConcurrencyJobs)
 	EmitJobsIfReadyByJobs(cancelledConcurrencyJobs)
+
+	// Fresh-run kickoff for reusable workflows: callers were inserted as Blocked, so
+	// the resolver/dispatch pipeline must run once to ready them and advance their
+	// subtrees. checkJobsByRunID's fixed-point dispatch handles arbitrary nesting.
+	if hasCallerJobs {
+		if err := checkJobsByRunID(ctx, run.ID); err != nil {
+			log.Error("checkJobsByRunID after InsertRun for run %d: %v", run.ID, err)
+		}
+	}
 
 	return nil
 }
