@@ -193,10 +193,43 @@ func generateTaskContext(ctx context.Context, t *actions_model.ActionTask) (*str
 	}
 
 	gitCtx := GenerateGiteaContext(ctx, t.Job.Run, nil, t.Job)
+	if t.Job.ParentJobID > 0 {
+		if err := setCalledWorkflowContext(ctx, t.Job, gitCtx); err != nil {
+			return nil, err
+		}
+	}
 	gitCtx["token"] = t.Token
 	gitCtx["gitea_runtime_token"] = giteaRuntimeToken
 
 	return structpb.NewStruct(gitCtx)
+}
+
+// setCalledWorkflowContext passes the full `inputs` of a called workflow's job to the runner in `workflow_call`,
+// as the runner cannot resolve them itself: the caller's `with:` is evaluated by the server.
+func setCalledWorkflowContext(ctx context.Context, job *actions_model.ActionRunJob, gitCtx GiteaContext) error {
+	caller, workflowCallInputs, err := loadWorkflowCallInputs(ctx, job.Run, job)
+	if err != nil {
+		return err
+	}
+	jobInputs, err := calledWorkflowInputs(ctx, job.Run, caller, workflowCallInputs)
+	if err != nil {
+		return err
+	}
+	workflowCallCtx := map[string]any{
+		"event_name": gitCtx["event_name"],
+		"inputs":     jobInputs,
+	}
+	// For compatibility with older runners, which only read a called workflow's inputs from `event.inputs` while
+	// `event_name` is "workflow_call". Newer runners restore the trigger's event name and inputs saved in `workflow_call`.
+	if event, ok := gitCtx["event"].(map[string]any); ok {
+		if triggerEventInputs, ok := event["inputs"]; ok {
+			workflowCallCtx["event_inputs"] = triggerEventInputs
+		}
+		event["inputs"] = workflowCallInputs
+	}
+	gitCtx["event_name"] = "workflow_call"
+	gitCtx["workflow_call"] = workflowCallCtx
+	return nil
 }
 
 func findTaskNeeds(ctx context.Context, taskJob *actions_model.ActionRunJob) (map[string]*runnerv1.TaskNeed, error) {

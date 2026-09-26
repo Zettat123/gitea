@@ -273,6 +273,13 @@ jobs:
 				if assert.Len(t, r2Job1Payload.Inputs, 1) {
 					assert.Equal(t, "from_caller_job2", r2Job1Payload.Inputs["msg"])
 				}
+				// older runners read the inputs above while event_name is workflow_call,
+				// newer ones restore the caller's trigger event from workflow_call, even when nested
+				assert.Equal(t, "workflow_call", r2Job1Task.GetContext().GetFields()["event_name"].GetStringValue())
+				workflowCall := r2Job1Task.GetContext().GetFields()["workflow_call"].GetStructValue().GetFields()
+				assert.Equal(t, "push", workflowCall["event_name"].GetStringValue())
+				assert.NotContains(t, workflowCall, "event_inputs")
+				assert.Equal(t, map[string]any{"msg": "from_caller_job2"}, workflowCall["inputs"].GetStructValue().AsMap())
 				defaultRunner.execTask(t, r2Job1Task, &mockTaskOutcome{
 					result: runnerv1.Result_RESULT_SUCCESS,
 				})
